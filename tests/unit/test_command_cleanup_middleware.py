@@ -54,3 +54,18 @@ async def test_command_cleanup_ignores_delete_errors() -> None:
     await middleware(handler, message, {})
 
     message.delete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", ["/", "/   ", " / ", "/\\t"])
+@pytest.mark.parametrize("chat_type", ["group", "supergroup"])
+async def test_cleanup_passes_empty_slash_without_deleting(raw: str, chat_type: str) -> None:
+    middleware = CommandCleanupMiddleware()
+    handler = AsyncMock(return_value="handled")
+    message = _message(text=raw, chat_type=chat_type)
+
+    result = await middleware(handler, message, {})
+
+    assert result == "handled"
+    handler.assert_awaited_once_with(message, {})
+    message.delete.assert_not_awaited()

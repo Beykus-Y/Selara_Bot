@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 import logging
 import random
 import re
+from time import time, monotonic
 from html import escape
 from typing import Any
 
@@ -64,6 +66,8 @@ router = Router(name="game")
 logger = logging.getLogger(__name__)
 
 _GAME_PHASE_TASKS: dict[str, asyncio.Task[None]] = {}
+_GAME_RULES_COOLDOWN_SECONDS = 120
+_GAME_RULES_LAST_SENT: dict[int, float] = {}  # one rules message per chat per cooldown window
 _BOT_USERNAME_CACHE: str | None = None
 _LOBBY_VIEW_LIMIT = 12
 _ALIVE_VIEW_LIMIT = 12
@@ -81,6 +85,7 @@ _GAME_WINNER_REWARD_TOTAL_BY_KIND: dict[GameKind, tuple[int, int]] = {
     "whoami": (125, 155),
 }
 _ZLOBCARDS_PRIVATE_SECONDS = 75
+_ZLOBCARDS_RECOVERY_GRACE_SECONDS = 90  # one bounded extra chance for absent submissions
 _ZLOBCARDS_VOTE_SECONDS = 75
 
 
@@ -580,7 +585,14 @@ def _build_mafia_day_vote_buttons(game: GroupGame) -> InlineKeyboardMarkup | Non
     if game.kind != "mafia" or game.phase != "day_vote" or game.status != "started":
         return None
 
-    alive_items = _sorted_player_ids(game, game.alive_player_ids)
+    # Shared buttons cannot know which user will click. However a
+    # day-vote-immune player is an invalid target for *everyone*.
+    # Exclude that target, leaving the per-voter self-target check in store.
+    eligible_ids = (
+        uid for uid in game.alive_player_ids
+        if uid != game.day_vote_immune_user_id
+    )
+    alive_items = _sorted_player_ids(game, eligible_ids)
     if not alive_items:
         return None
 
@@ -590,7 +602,7 @@ def _build_mafia_day_vote_buttons(game: GroupGame) -> InlineKeyboardMarkup | Non
         label = game.players.get(user_id, f"user:{user_id}")
         count_text = f" · {vote_counts.get(user_id, 0)}" if vote_counts.get(user_id, 0) > 0 else ""
         text = label if len(label) <= 15 else f"{label[:12]}..."
-        builder.button(text=f"🗳 {text}{count_text}", callback_data=f"gmvote:{game.game_id}:{user_id}")
+        builder.button(text=f"🗳 {text}{count_text}", callback_data=f"gmvote:{game.game_id}:{game.round_no}:{user_id}")
 
     builder.adjust(2)
     return builder.as_markup()
@@ -603,7 +615,12 @@ def _build_private_day_vote_keyboard(game: GroupGame, *, actor_user_id: int) -> 
     if actor_user_id not in game.alive_player_ids:
         return None
 
-    alive_items = sorted(game.alive_player_ids)
+    # Unlike the shared group board, a private keyboard can be personalized.
+    # Never offer targets rejected by the existing server-side voting rules.
+    alive_items = sorted(
+        uid for uid in game.alive_player_ids
+        if uid != actor_user_id and uid != game.day_vote_immune_user_id
+    )
     if not alive_items:
         return None
 
@@ -613,7 +630,7 @@ def _build_private_day_vote_keyboard(game: GroupGame, *, actor_user_id: int) -> 
         label = game.players.get(user_id, f"user:{user_id}")
         text = label if len(label) <= 24 else f"{label[:21]}..."
         icon = "✅" if current_target_user_id == user_id else "🗳"
-        builder.button(text=f"{icon} {text}", callback_data=f"gmvote:{game.game_id}:{user_id}")
+        builder.button(text=f"{icon} {text}", callback_data=f"gmvote:{game.game_id}:{game.round_no}:{user_id}")
 
     builder.adjust(1)
     return builder.as_markup()
@@ -626,9 +643,9 @@ def _build_mafia_execution_confirm_buttons(game: GroupGame) -> InlineKeyboardMar
     voted_count, alive_count, yes_count, no_count = _count_alive_execution_confirm_votes(game)
 
     builder = InlineKeyboardBuilder()
-    builder.button(text=f"✅ Да ({yes_count})", callback_data=f"gmconfirm:{game.game_id}:yes")
-    builder.button(text=f"❌ Нет ({no_count})", callback_data=f"gmconfirm:{game.game_id}:no")
-    builder.button(text=f"🗳 {voted_count}/{alive_count}", callback_data=f"gmconfirm:{game.game_id}:noop")
+    builder.button(text=f"✅ Да ({yes_count})", callback_data=f"gmconfirm:{game.game_id}:{game.round_no}:yes")
+    builder.button(text=f"❌ Нет ({no_count})", callback_data=f"gmconfirm:{game.game_id}:{game.round_no}:no")
+    builder.button(text=f"🗳 {voted_count}/{alive_count}", callback_data=f"gmconfirm:{game.game_id}:{game.round_no}:noop")
     builder.adjust(2, 1)
     return builder.as_markup()
 
@@ -657,13 +674,13 @@ def _build_quiz_answer_buttons(game: GroupGame) -> InlineKeyboardMarkup | None:
         short_text = option_text if len(option_text) <= 18 else f"{option_text[:15]}..."
         builder.button(
             text=f"{_quiz_choice_label(option_index)}. {short_text}",
-            callback_data=f"gquiz:{game.game_id}:{option_index}",
+            callback_data=f"gquiz:{game.game_id}:{game.quiz_current_question_index}:{option_index}",
         )
 
     answered_count = len({user_id for user_id in game.quiz_answers if user_id in game.players})
     builder.button(
         text=f"🗳 {answered_count}/{len(game.players)}",
-        callback_data=f"gquiz:{game.game_id}:noop",
+        callback_data=f"gquiz:{game.game_id}:{game.quiz_current_question_index}:noop",
     )
     builder.adjust(2, 2, 1)
     return builder.as_markup()
@@ -683,9 +700,20 @@ def _build_spy_vote_buttons(game: GroupGame) -> InlineKeyboardMarkup | None:
         builder.button(text=f"🚨 {text}{count_text}", callback_data=f"gspy:{game.game_id}:{user_id}")
 
     voted_count = len(game.spy_votes)
+    builder.button(text="👤 Мой голос", callback_data=f"gspy:{game.game_id}:mine")
     builder.button(text=f"🗳 {voted_count}/{len(game.players)}", callback_data=f"gspy:{game.game_id}:noop")
-    builder.adjust(2, 2, 1)
+    builder.adjust(2)
     return builder.as_markup()
+
+
+def _whoami_question_token(game: GroupGame) -> int:
+    # Some restored/legacy fixtures have no phase-start timestamp. New live
+    # questions always have one, providing a monotonic-enough unique token
+    # even after the visible history reaches its trimming limit.
+    return (
+        int(game.phase_started_at.timestamp() * 1_000_000)
+        if game.phase_started_at is not None else 0
+    )
 
 
 def _build_whoami_answer_buttons(game: GroupGame) -> InlineKeyboardMarkup | None:
@@ -695,10 +723,11 @@ def _build_whoami_answer_buttons(game: GroupGame) -> InlineKeyboardMarkup | None
         return None
 
     builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Да", callback_data=f"gwho:{game.game_id}:yes")
-    builder.button(text="❌ Нет", callback_data=f"gwho:{game.game_id}:no")
-    builder.button(text="🤷 Не знаю", callback_data=f"gwho:{game.game_id}:unknown")
-    builder.button(text="🎭 Неважно", callback_data=f"gwho:{game.game_id}:irrelevant")
+    revision = _whoami_question_token(game)
+    builder.button(text="✅ Да", callback_data=f"gwho:{game.game_id}:{revision}:yes")
+    builder.button(text="❌ Нет", callback_data=f"gwho:{game.game_id}:{revision}:no")
+    builder.button(text="🤷 Не знаю", callback_data=f"gwho:{game.game_id}:{revision}:unknown")
+    builder.button(text="🎭 Неважно", callback_data=f"gwho:{game.game_id}:{revision}:irrelevant")
     builder.adjust(2, 2)
     return builder.as_markup()
 
@@ -714,11 +743,11 @@ def _build_bred_vote_buttons(game: GroupGame) -> InlineKeyboardMarkup | None:
         short_text = option_text if len(option_text) <= 24 else f"{option_text[:21]}..."
         builder.button(
             text=f"{_quiz_choice_label(option_index)}. {short_text}",
-            callback_data=f"gbred:{game.game_id}:{option_index}",
+            callback_data=f"gbred:{game.game_id}:{game.round_no}:{option_index}",
         )
 
     voted_count = len({user_id for user_id in game.bred_votes if user_id in game.players})
-    builder.button(text=f"🗳 {voted_count}/{len(game.players)}", callback_data=f"gbred:{game.game_id}:noop")
+    builder.button(text=f"🗳 {voted_count}/{len(game.players)}", callback_data=f"gbred:{game.game_id}:{game.round_no}:noop")
     builder.adjust(2, 2, 1)
     return builder.as_markup()
 
@@ -734,7 +763,7 @@ def _build_bred_category_buttons(game: GroupGame) -> InlineKeyboardMarkup | None
         text = category if len(category) <= 22 else f"{category[:19]}..."
         builder.button(
             text=f"📚 {text}",
-            callback_data=f"gbredcat:{game.game_id}:{option_index}",
+            callback_data=f"gbredcat:{game.game_id}:{game.round_no}:{option_index}",
         )
 
     selector_label = "-"
@@ -742,7 +771,7 @@ def _build_bred_category_buttons(game: GroupGame) -> InlineKeyboardMarkup | None
         selector_label = game.players.get(game.bred_current_selector_user_id, f"user:{game.bred_current_selector_user_id}")
     builder.button(
         text=f"🎯 Ход: {selector_label[:16]}",
-        callback_data=f"gbredcat:{game.game_id}:noop",
+        callback_data=f"gbredcat:{game.game_id}:{game.round_no}:noop",
     )
     builder.adjust(2, 2, 1)
     return builder.as_markup()
@@ -759,11 +788,11 @@ def _build_zlob_vote_buttons(game: GroupGame) -> InlineKeyboardMarkup | None:
         short_text = option_text if len(option_text) <= 24 else f"{option_text[:21]}..."
         builder.button(
             text=f"{_quiz_choice_label(option_index)}. {short_text}",
-            callback_data=f"gzlobv:{game.game_id}:{option_index}",
+            callback_data=f"gzlobv:{game.game_id}:{game.round_no}:{option_index}",
         )
 
     voted_count = len({user_id for user_id in game.zlob_votes if user_id in game.players})
-    builder.button(text=f"🗳 {voted_count}/{len(game.players)}", callback_data=f"gzlobv:{game.game_id}:noop")
+    builder.button(text=f"🗳 {voted_count}/{len(game.players)}", callback_data=f"gzlobv:{game.game_id}:{game.round_no}:noop")
     builder.adjust(2, 2, 1)
     return builder.as_markup()
 
@@ -785,20 +814,18 @@ def _build_private_zlob_submit_keyboard(game: GroupGame, *, actor_user_id: int) 
             label = card_text if len(card_text) <= 24 else f"{card_text[:21]}..."
             builder.button(
                 text=f"🃏 {label}",
-                callback_data=f"gzlobp:{game.game_id}:{card_index}",
+                callback_data=f"gzlobp:{game.game_id}:{game.round_no}:{card_index}",
             )
     else:
         for first in range(len(hand)):
             for second in range(first + 1, len(hand)):
-                first_text = hand[first]
-                second_text = hand[second]
-                merged = f"{first_text} + {second_text}"
-                label = merged if len(merged) <= 24 else f"{merged[:21]}..."
+                # Numbered choices map to full-length card text in the
+                # private hand, avoiding two truncated labels looking equal.
                 builder.button(
-                    text=f"🃏 {label}",
-                    callback_data=f"gzlobp:{game.game_id}:{first}-{second}",
+                    text=f"🃏 {first + 1} + {second + 1}",
+                    callback_data=f"gzlobp:{game.game_id}:{game.round_no}:{first}-{second}",
                 )
-    builder.button(text="🔄 Обновить", callback_data=f"gzlobp:{game.game_id}:noop")
+    builder.button(text="🔄 Обновить", callback_data=f"gzlobp:{game.game_id}:{game.round_no}:noop")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -822,8 +849,8 @@ def _build_private_bunker_reveal_keyboard(game: GroupGame, *, actor_user_id: int
     builder = InlineKeyboardBuilder()
     for field_key in hidden_fields:
         text = _bunker_field_label(field_key)
-        builder.button(text=f"🃏 {text}", callback_data=f"gbkr:{game.game_id}:{field_key}")
-    builder.button(text="🔄 Обновить", callback_data=f"gbkr:{game.game_id}:noop")
+        builder.button(text=f"🃏 {text}", callback_data=f"gbkr:{game.game_id}:{game.round_no}:{game.bunker_reveal_cursor}:{field_key}")
+    builder.button(text="🔄 Обновить", callback_data=f"gbkr:{game.game_id}:{game.round_no}:{game.bunker_reveal_cursor}:noop")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -844,8 +871,8 @@ def _build_private_bunker_vote_keyboard(game: GroupGame, *, actor_user_id: int) 
         label = game.players.get(user_id, f"user:{user_id}")
         short_label = label if len(label) <= 24 else f"{label[:21]}..."
         icon = "✅" if current_target == user_id else "🗳"
-        builder.button(text=f"{icon} {short_label}", callback_data=f"gbkv:{game.game_id}:{user_id}")
-    builder.button(text="🔄 Обновить", callback_data=f"gbkv:{game.game_id}:noop")
+        builder.button(text=f"{icon} {short_label}", callback_data=f"gbkv:{game.game_id}:{game.round_no}:{user_id}")
+    builder.button(text="🔄 Обновить", callback_data=f"gbkv:{game.game_id}:{game.round_no}:noop")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -863,7 +890,7 @@ def _build_private_night_action_keyboard(game: GroupGame, *, actor_user_id: int)
     for user_id in targets:
         label = game.players.get(user_id, f"user:{user_id}")
         text = label if len(label) <= 24 else f"{label[:21]}..."
-        builder.button(text=f"🎯 {text}", callback_data=f"gmact:{game.game_id}:{user_id}")
+        builder.button(text=f"🎯 {text}", callback_data=f"gmact:{game.game_id}:{game.round_no}:{user_id}")
     columns = 1
     if len(targets) >= 4:
         columns = 2
@@ -951,6 +978,7 @@ def _render_spy_vote_status(game: GroupGame) -> str:
         lines.append(f"<b>Доска подозрений:</b> {_render_vote_leaders(game, vote_counts, limit=4)}")
     else:
         lines.append("<b>Главный подозреваемый:</b> пока нет.")
+    lines.append("<i>Нажмите на подозреваемого, чтобы отдать или изменить голос; «Мой голос» покажет ваш выбор лично вам.</i>")
 
     _append_waiting_line(lines, game, pool=game.players.keys(), answered=game.spy_votes, label="Ещё без голоса")
 
@@ -1003,11 +1031,18 @@ def _should_handle_whoami_group_text(active_game: GroupGame | None, *, user_id: 
     return bool(text.strip())
 
 
-def _should_handle_bred_private_answer(game: GroupGame | None, *, text: str) -> bool:
+def _should_handle_bred_private_answer(
+    game: GroupGame | None, *, text: str, replied_prompt: str | None = None,
+) -> bool:
     normalized = text.strip()
-    if not normalized or normalized.startswith("/"):
+    if not normalized or normalized.startswith("/") or game is None:
         return False
-    return game is not None
+    if replied_prompt is not None:
+        # Replies to Personal AI and other bot messages must not be mistaken
+        # for a free-text bluff. Only the current tagged Bred prompt qualifies.
+        return f"Контекст блефа: {game.game_id}/{game.round_no}" in replied_prompt
+    # Preserve the established one-message DM submission flow.
+    return True
 
 
 def _render_whoami_history(game: GroupGame, *, limit: int = 6) -> str:
@@ -1050,10 +1085,10 @@ def _render_whoami_status(game: GroupGame) -> str:
     ]
     if game.phase == "whoami_ask":
         lines.append("<b>Сейчас:</b> ход текущего игрока.")
-        lines.append("<b>Что делать:</b> задайте вопрос сообщением в чат или сделайте догадку.")
+        lines.append("<b>Что делать:</b> задайте вопрос с «?» или сделайте догадку обычным сообщением в группу (без команды).")
         lines.append(
-            "<i>Вопрос — любое сообщение с «?». Догадка — например: "
-            "«Я думаю, что я [ответ]», «моя догадка: [ответ]» или «кажется, я [ответ]».</i>"
+            "<i>Вопрос: «Я человек?» (знак ? обязателен). Догадка: "
+            "«Я думаю, что я Шерлок Холмс» или «моя догадка: Шерлок Холмс».</i>"
         )
         lines.append(
             "<i>Если игрок разгадал себя, он выходит из круга вопросов, "
@@ -1063,6 +1098,9 @@ def _render_whoami_status(game: GroupGame) -> str:
         lines.append(f"<b>Вопрос:</b> {escape(game.whoami_pending_question_text or '-')}")
         lines.append("<b>Сейчас:</b> ждём ответ стола.")
         lines.append("<b>Что делать:</b> любой, кроме спрашивающего, отвечает кнопкой «да / нет / не знаю / неважно».")
+
+    if game.phase == "whoami_answer":
+        lines.append("<i>Да — игрок задаёт следующий вопрос; нет / не знаю / неважно — ход переходит дальше.</i>")
 
     lines.append("")
     lines.append(_render_whoami_history(game))
@@ -1083,7 +1121,11 @@ def _render_dice_progress(game: GroupGame) -> str:
             game.dice_scores.items(),
             key=lambda item: (-item[1], game.players.get(item[0], f"user:{item[0]}").lower(), item[0]),
         )
-        lines.append("<b>Текущие броски:</b>")
+        lines.append("<b>Итоговые броски:</b>" if game.status == "finished" else "<b>Текущие броски:</b>")
+        best = ranking[0][1]
+        leaders = [game.players.get(uid, f"user:{uid}") for uid, score in ranking if score == best]
+        if game.status == "started":
+            lines.append("<b>Пока лидирует:</b> " + escape(", ".join(leaders)) + f" ({best})")
         for idx, (user_id, score) in enumerate(ranking, start=1):
             lines.append(f"{idx}. {_mention(user_id, game.players.get(user_id, f'user:{user_id}'))} — <code>{score}</code>")
 
@@ -1496,7 +1538,7 @@ def _render_bred_question(game: GroupGame) -> str:
             f"<b>Категорию выбирает:</b> {escape(selector_label)}",
         ]
         if game.bred_category_options:
-            lines.append("<i>Кнопки ниже сразу откроют тему раунда.</i>")
+            lines.append("<i>Тему выбирает назначенный игрок; после выбора остальные отправляют ложные ответы в ЛС.</i>")
         return "\n".join(lines)
 
     if not game.bred_question_prompt:
@@ -1516,6 +1558,8 @@ def _render_bred_question(game: GroupGame) -> str:
         waiting_user_ids = [
             user_id for user_id in _sorted_player_ids(game, game.players.keys()) if user_id not in game.bred_lies
         ]
+        lines.append("<b>Где отвечать:</b> отправьте ЛОЖЬ обычным сообщением в ЛС боту. Правду выбираем позже.")
+        lines.append("<i>В группе ответы не раскрываются до голосования.</i>")
         lines.append(f"<b>Сдано:</b> {len(submitted_user_ids)}/{len(game.players)}")
         lines.append(f"<b>Уже ответили:</b> {_render_player_inline_list(game, submitted_user_ids, limit=6)}")
         if waiting_user_ids:
@@ -1536,7 +1580,12 @@ def _render_bred_question(game: GroupGame) -> str:
                     leader_text = f"{_quiz_choice_label(leader_indices[0])} ({top_votes})"
                 else:
                     leader_text = f"ничья по {top_votes}"
-        lines.append("<i>Голос можно менять до конца этапа.</i>")
+        lines.append("<i>Теперь выберите ПРАВДУ, а не наиболее смешную ложь. "
+                     "Ответы пока анонимны; выбор можно изменить до подсчёта.</i>")
+        if game.bred_options:
+            lines.append("<b>Варианты полностью (кнопки ниже соответствуют буквам):</b>")
+            for idx, option in enumerate(game.bred_options[:12]):
+                lines.append(f"{_quiz_choice_label(idx)}. {escape(option)}")
         voted_count = len({user_id for user_id in game.bred_votes if user_id in game.players})
         lines.append(f"<b>Прогресс:</b> {voted_count}/{len(game.players)} голосов")
         lines.append(f"<b>Лидер:</b> {leader_text}")
@@ -1585,7 +1634,12 @@ def _render_zlob_round_status(game: GroupGame) -> str:
                     leader_text = f"{_quiz_choice_label(leader_indices[0])} ({top_votes})"
                 else:
                     leader_text = f"ничья по {top_votes}"
-        lines.append("<i>Голос можно менять до закрытия раунда.</i>")
+        lines.append("<i>Голосуйте за лучший анонимный ответ, кроме собственного. "
+                     "Выбор можно поменять до закрытия раунда; авторы будут раскрыты после подсчёта.</i>")
+        if game.zlob_options:
+            lines.append("<b>Все варианты (буквы соответствуют кнопкам):</b>")
+            for idx, option in enumerate(game.zlob_options[:12]):
+                lines.append(f"{_quiz_choice_label(idx)}. {escape(option)}")
         voted_count = len({user_id for user_id in game.zlob_votes if user_id in game.players})
         lines.append(f"<b>Прогресс:</b> {voted_count}/{len(game.players)} голосов")
         lines.append(f"<b>Лидер:</b> {leader_text}")
@@ -1828,6 +1882,9 @@ def _render_game_text(
             voted_count = len({voter for voter in game.day_votes if voter in game.alive_player_ids})
             lines.append(f"<b>Сейчас:</b> дневное голосование ({_format_duration(chat_settings.mafia_vote_seconds)}).")
             lines.append("<b>Что делать:</b> выберите кандидата кнопками ниже или в ЛС-карточке.")
+            lines.append("<i>За себя голосовать нельзя; в ЛС показаны только разрешённые лично вам цели.</i>")
+            if game.day_vote_immune_user_id is not None:
+                lines.append("<i>Защищённая цель недоступна для голосования и не показывается кнопкой.</i>")
             lines.append(f"<b>Прогресс:</b> {voted_count}/{len(game.alive_player_ids)}")
             lines.append(f"<b>Под ударом:</b> {_render_vote_leaders(game, _mafia_day_vote_counts(game))}")
             _append_waiting_line(lines, game, pool=game.alive_player_ids, answered=game.day_votes)
@@ -1869,16 +1926,19 @@ def _render_game_text(
         lines.append("")
         lines.append(_render_roles_reveal(game))
 
-    if game.kind == "dice" and game.status == "started":
-        lines.append("<b>Сейчас:</b> все бросают кубик, один бросок на игрока.")
-        lines.append("<b>Что делать:</b> нажмите «🎲 Бросить» ниже.")
+    if game.kind == "dice" and game.status in {"started", "finished"}:
+        if game.status == "started":
+            lines.append("<b>Сейчас:</b> все бросают кубик, один бросок на игрока.")
+            lines.append("<b>Что делать:</b> нажмите «🎲 Бросить» один раз; повторный бросок недоступен.")
+        else:
+            lines.append("<b>Сейчас:</b> все броски завершены. Ниже итоговая таблица.")
         lines.append("")
         lines.append(_render_dice_progress(game))
 
     if game.kind == "quiz" and game.status == "started":
         lines.append(f"<b>Раунд:</b> {max(game.round_no, 1)}")
         lines.append("<b>Сейчас:</b> идёт вопрос, все отвечают одновременно.")
-        lines.append("<b>Что делать:</b> выбирайте ответ кнопками под этим сообщением.")
+        lines.append("<b>Что делать:</b> выберите букву ответа кнопкой ниже. Полный текст вариантов — под вопросом; пока вопрос открыт, выбор можно изменить.")
         question_block = _render_quiz_question(game)
         if question_block:
             lines.append("")
@@ -1888,6 +1948,10 @@ def _render_game_text(
             lines.append("")
             lines.append(score_block)
 
+    if game.kind == "quiz" and game.status == "finished":
+        lines.append("<b>Сейчас:</b> викторина завершена. Итоговые очки:")
+        lines.append(_render_quiz_scoreboard(game))
+
     if game.kind == "bredovukha" and game.status == "started":
         lines.append(f"<b>Раунд:</b> {max(game.round_no, 1)}/{game.bred_rounds}")
         lines.append("<i>Очки: +2 за правду, +1 за каждого, кто попался на вашу ложь.</i>")
@@ -1896,7 +1960,7 @@ def _render_game_text(
             lines.append("<b>Что делать:</b> выбранный игрок жмёт тему кнопками ниже.")
         elif game.phase == "private_answers":
             lines.append("<b>Сейчас:</b> сбор ответов в ЛС.")
-            lines.append("<b>Что делать:</b> придумайте правдоподобную ложь и сдайте её боту в ЛС или на сайте.")
+            lines.append("<b>Что делать:</b> придумайте ЛОЖЬ для пропущенного слова или факта и отправьте её боту личным сообщением (1–120 символов).")
         elif game.phase == "public_vote":
             lines.append("<b>Сейчас:</b> голосование за самый правдоподобный вариант.")
             lines.append("<b>Что делать:</b> голосуйте кнопкой за тот, что кажется настоящим.")
@@ -1914,7 +1978,7 @@ def _render_game_text(
         lines.append(f"<b>Цель по очкам:</b> {game.zlob_target_score}")
         if game.phase == "private_answers":
             lines.append("<b>Сейчас:</b> сбор карт в ЛС.")
-            lines.append("<b>Что делать:</b> выберите карту(ы) из руки в ЛС или на сайте.")
+            lines.append(f"<b>Что делать:</b> откройте ЛС: чёрная карта задаёт {max(1, int(game.zlob_black_slots))} пропуск(а), заполните их белыми картами из руки.")
         elif game.phase == "public_vote":
             lines.append("<b>Сейчас:</b> голосование за лучший анонимный вариант.")
             lines.append("<b>Что делать:</b> голосуйте кнопкой за лучший вариант.")
@@ -1982,6 +2046,74 @@ def _add_stepper_row(
     builder.button(text=value_text, callback_data=f"gcfg:{game_id}:{key}_noop")
     builder.button(text=f"➕ {control_label}", callback_data=f"gcfg:{game_id}:{key}_inc")
     lobby_row_sizes.append(3)
+
+
+def _build_lifecycle_confirmation_keyboard(
+    *, game: GroupGame, action: str, issued_at: int,
+) -> InlineKeyboardMarkup:
+    # The game board stays intact; phase and round are verified at commit.
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="✅ Подтвердить завершение" if action == "stop" else "🔎 Подтвердить раскрытие",
+        callback_data=f"game:{'sok' if action == 'stop' else 'rok'}:{game.game_id}:{game.phase}:{game.round_no}:{issued_at}",
+    )
+    builder.button(
+        text="← Назад к игре",
+        callback_data=f"game:back:{game.game_id}:{game.phase}:{game.round_no}:{issued_at}",
+    )
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def _manager_advance_step(game: GroupGame) -> int:
+    """Unique step for an admin control within a phase and round."""
+    if game.kind == "bunker" and game.phase == "bunker_reveal":
+        return game.bunker_reveal_cursor
+    if game.kind == "quiz" and game.phase == "freeplay":
+        return game.quiz_current_question_index if game.quiz_current_question_index is not None else -1
+    return 0
+
+
+def _build_game_manager_controls(game: GroupGame) -> InlineKeyboardMarkup | None:
+    """Separate phase controls from participants' shared action keyboard."""
+    if game.status != "started":
+        return None
+    builder = InlineKeyboardBuilder()
+    if game.kind == "mafia" and game.phase in {"night", "day_discussion", "day_vote", "day_execution_confirm"}:
+        advance_text = "⏭ Следующая фаза"
+        if game.phase == "night":
+            advance_text = "🌅 Завершить ночь"
+        elif game.phase == "day_discussion":
+            advance_text = "🗳 Открыть голосование"
+        elif game.phase == "day_vote":
+            advance_text = "⚖️ Подвести голоса"
+        elif game.phase == "day_execution_confirm":
+            advance_text = "☠️ Закрыть казнь"
+        builder.button(text=advance_text, callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}:{_manager_advance_step(game)}")
+    if game.kind == "quiz" and game.phase == "freeplay":
+        builder.button(text="⏭ Закрыть вопрос", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}:{_manager_advance_step(game)}")
+    if game.kind == "bredovukha" and game.phase == "category_pick":
+        builder.button(text="🎲 Случайная тема", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}:{_manager_advance_step(game)}")
+    if game.kind == "bredovukha" and game.phase == "private_answers":
+        builder.button(text="🗳 Открыть голосование", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}:{_manager_advance_step(game)}")
+    if game.kind == "bredovukha" and game.phase == "public_vote":
+        builder.button(text="📣 Закрыть раунд", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}:{_manager_advance_step(game)}")
+    if game.kind == "zlobcards" and game.phase == "private_answers":
+        builder.button(text="🗳 Открыть голосование", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}:{_manager_advance_step(game)}")
+    if game.kind == "zlobcards" and game.phase == "public_vote":
+        builder.button(text="📣 Закрыть раунд", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}:{_manager_advance_step(game)}")
+    if game.kind == "bunker" and game.phase == "bunker_reveal":
+        builder.button(text="⏭ Пропустить ход", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}:{_manager_advance_step(game)}")
+    if game.kind == "bunker" and game.phase == "bunker_vote":
+        builder.button(text="⏭ Завершить голосование", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}:{_manager_advance_step(game)}")
+
+    if game.kind == "spy" and game.phase == "freeplay":
+        builder.button(text="🔎 Раскрыть роли", callback_data=f"game:reveal:{game.game_id}")
+
+    builder.button(text="🛑 Завершить", callback_data=f"game:cancel:{game.game_id}")
+
+    builder.adjust(1)
+    return builder.as_markup()
 
 
 def _build_game_controls(*, game: GroupGame, bot_username: str) -> InlineKeyboardMarkup | None:
@@ -2052,41 +2184,10 @@ def _build_game_controls(*, game: GroupGame, bot_username: str) -> InlineKeyboar
         return builder.as_markup()
 
     elif game.status == "started":
-        if game.kind == "mafia" and game.phase in {"night", "day_discussion", "day_vote", "day_execution_confirm"}:
-            advance_text = "⏭ Следующая фаза"
-            if game.phase == "night":
-                advance_text = "🌅 Завершить ночь"
-            elif game.phase == "day_discussion":
-                advance_text = "🗳 Открыть голосование"
-            elif game.phase == "day_vote":
-                advance_text = "⚖️ Подвести голоса"
-            elif game.phase == "day_execution_confirm":
-                advance_text = "☠️ Закрыть казнь"
-            builder.button(text=advance_text, callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "quiz" and game.phase == "freeplay":
-            builder.button(text="⏭ Закрыть вопрос", callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "bredovukha" and game.phase == "category_pick":
-            builder.button(text="🎲 Случайная тема", callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "bredovukha" and game.phase == "private_answers":
-            builder.button(text="🗳 Открыть голосование", callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "bredovukha" and game.phase == "public_vote":
-            builder.button(text="📣 Закрыть раунд", callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "zlobcards" and game.phase == "private_answers":
-            builder.button(text="🗳 Открыть голосование", callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "zlobcards" and game.phase == "public_vote":
-            builder.button(text="📣 Закрыть раунд", callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "bunker" and game.phase == "bunker_reveal":
-            builder.button(text="⏭ Пропустить ход", callback_data=f"game:advance:{game.game_id}")
-        if game.kind == "bunker" and game.phase == "bunker_vote":
-            builder.button(text="⏭ Завершить голосование", callback_data=f"game:advance:{game.game_id}")
         if game.kind == "dice" and game.phase == "freeplay":
             builder.button(text="🎲 Бросить", callback_data=f"gdice:{game.game_id}:roll")
-
         if game.kind == "spy" and game.phase == "freeplay":
             builder.button(text="📍 Сводка голосов", callback_data=f"gspy:{game.game_id}:noop")
-            builder.button(text="🔎 Раскрыть роли", callback_data=f"game:reveal:{game.game_id}")
-
-        builder.button(text="🛑 Завершить", callback_data=f"game:cancel:{game.game_id}")
 
     elif game.status == "finished":
         builder.button(text="🔁 Ещё раз", callback_data=f"game:rematch:{game.game_id}")
@@ -2147,6 +2248,17 @@ def _build_game_controls(*, game: GroupGame, bot_username: str) -> InlineKeyboar
             for button in row:
                 builder.add(button)
 
+    if game.status == "started":
+        # All primary actions (votes, answers, private links) precede this
+        # separate footer. Admin actions are reached via a checked surface.
+        footer = InlineKeyboardBuilder()
+        footer.button(text="❓ Как играть", callback_data=f"game:lrules:{game.game_id}")
+        footer.button(text="⚙️ Ведущему", callback_data=f"game:manage:{game.game_id}")
+        footer.adjust(2)
+        builder.adjust(2)
+        return InlineKeyboardMarkup(
+            inline_keyboard=[*builder.as_markup().inline_keyboard, *footer.as_markup().inline_keyboard],
+        )
     if not builder.buttons:
         return None
 
@@ -2215,19 +2327,52 @@ async def _send_game_feed_event(
         await bot.send_message(**kwargs)
 
 
-async def _sync_quiz_feed_message(bot: Bot, game: GroupGame, *, question_no: int | None) -> None:
+async def _sync_quiz_feed_message(
+    bot: Bot,
+    game: GroupGame,
+    *,
+    question_no: int | None,
+    expected_question_index: int | None = None,
+) -> None:
     if game.kind != "quiz":
         return
 
-    if game.quiz_feed_message_id is not None:
+    # A transition result carries the immutable question index: a mutable
+    # GroupGame can already show a newer question after Telegram awaits.
+    question_index = (
+        expected_question_index if expected_question_index is not None
+        else question_no - 1 if question_no is not None else None
+    )
+    valid, previous_message_id = await GAME_STORE.take_quiz_feed_message_id(
+        game_id=game.game_id,
+        expected_question_index=question_index,
+        finished_only=question_no is None,
+    )
+    if not valid:
+        return
+
+    if previous_message_id is not None:
         try:
-            await bot.delete_message(chat_id=game.chat_id, message_id=game.quiz_feed_message_id)
+            await bot.delete_message(chat_id=game.chat_id, message_id=previous_message_id)
         except (TelegramBadRequest, TelegramForbiddenError):
             pass
-        finally:
-            await GAME_STORE.set_quiz_feed_message_id(game_id=game.game_id, message_id=None)
 
     if question_no is None:
+        return
+
+    # RuntimeGameStore may await Redis after the atomic feed take. A fresh
+    # read right before publishing rejects a question superseded during that
+    # persistence or during deletion of the prior Telegram message.
+    async def question_is_current() -> bool:
+        current = await GAME_STORE.get_game(game.game_id)
+        return bool(
+            current is not None
+            and current.status == "started"
+            and current.phase == "freeplay"
+            and current.quiz_current_question_index == question_index
+        )
+
+    if not await question_is_current():
         return
 
     kwargs: dict[str, object] = {
@@ -2243,9 +2388,24 @@ async def _sync_quiz_feed_message(bot: Bot, game: GroupGame, *, question_no: int
         sent = await bot.send_message(**kwargs)
     except TelegramBadRequest:
         kwargs.pop("reply_to_message_id", None)
+        # The failed Telegram call yielded: another callback may have
+        # switched questions before this fallback re-send.
+        if not await question_is_current():
+            return
         sent = await bot.send_message(**kwargs)
 
-    await GAME_STORE.set_quiz_feed_message_id(game_id=game.game_id, message_id=sent.message_id)
+    recorded = await GAME_STORE.set_quiz_feed_message_id(
+        game_id=game.game_id,
+        message_id=sent.message_id,
+        expected_question_index=question_index,
+    )
+    if recorded is None:
+        # Another question (or finish) won during the network send. Only
+        # delete our obsolete message, never the winning question's feed.
+        try:
+            await bot.delete_message(chat_id=game.chat_id, message_id=sent.message_id)
+        except (TelegramBadRequest, TelegramForbiddenError):
+            pass
 
 
 def _build_private_phase_keyboard(game: GroupGame, *, actor_user_id: int) -> InlineKeyboardMarkup | None:
@@ -2351,15 +2511,19 @@ def _render_bred_private_status_text(game: GroupGame) -> str:
         f"<b>Чат:</b> {escape(game.chat_title or str(game.chat_id))}",
         f"<b>Раунд:</b> {game.round_no}/{game.bred_rounds}",
         f"<b>Категория:</b> {escape(game.bred_current_category or '-')}",
+        f"<b>Контекст блефа:</b> <code>{escape(game.game_id)}/{game.round_no}</code>",
     ]
     if game.phase == "private_answers" and game.bred_question_prompt:
         lines.append("<b>Факт с пропуском:</b>")
         lines.append(escape(game.bred_question_prompt))
-        lines.append("<i>Ответьте ложью — одно сообщение, без копирования чужих вариантов.</i>")
+        lines.append("<b>Ваше действие:</b> отправьте сюда ОДНУ придуманную ложь обычным сообщением, без команды и без «/».")
+        lines.append("<i>Ваш ответ можно заменить до начала голосования; другие игроки его пока не видят.</i>")
+        if len(game.players) > 0:
+            lines.append(f"<b>Уже сдали:</b> {len(game.bred_lies)}/{len(game.players)}")
     elif game.phase == "category_pick":
         lines.append("<i>Ждём, пока выбранный игрок выберет тему раунда в группе.</i>")
     elif game.phase == "public_vote":
-        lines.append("<i>Идёт голосование в группе за самый правдоподобный вариант.</i>")
+        lines.append("<i>Теперь выберите ПРАВДУ среди анонимных вариантов в групповой доске. Новую ложь в ЛС уже не принимаем.</i>")
     else:
         lines.append("<i>Сейчас нет действия, требующего вашего ответа в ЛС.</i>")
     return "\n".join(lines)
@@ -2424,16 +2588,17 @@ def _render_private_zlob_status_text(game: GroupGame, *, actor_user_id: int) -> 
             lines.append(f"{index}. {escape(card)}")
 
     if game.phase == "private_answers":
+        lines.append(f"<b>Нужно белых карт:</b> {max(1, int(game.zlob_black_slots))}. Полный текст карт указан выше; кнопки могут быть сокращены.")
         submission = game.zlob_submissions.get(actor_user_id)
         lines.append("")
         if submission:
             lines.append(f"<i>Вы уже выбрали: {escape(' + '.join(submission))}</i>")
             lines.append("<i>Можно выбрать другой вариант до конца этапа.</i>")
         else:
-            lines.append("<i>Выберите карточку(и) кнопками ниже.</i>")
+            lines.append("<i>Выберите одну или две карты согласно числу пропусков чёрной карточки. Для пар смотрите номера карт выше.</i>")
     elif game.phase == "public_vote":
         lines.append("")
-        lines.append("<i>Идёт голосование в группе. На свою карточку голосовать нельзя.</i>")
+        lines.append("<i>Карты сданы. В группе выберите чужую анонимную комбинацию; на свою голосовать нельзя.</i>")
     return "\n".join(lines)
 
 
@@ -2485,7 +2650,13 @@ def _render_private_bunker_status_text(game: GroupGame, *, actor_user_id: int) -
         _render_bunker_full_card(card),
     ]
 
-    if game.phase == "bunker_reveal":
+    if actor_user_id not in game.alive_player_ids:
+        lines.append("")
+        lines.append("<b>Вы выбыли.</b> Характеристики остаются только в вашей личной карточке. Вы можете наблюдать, но не раскрывать новые поля и не голосовать.")
+    elif game.phase == "bunker_reveal":
+        opened = game.bunker_revealed_fields.get(actor_user_id, set())
+        lines.append("")
+        lines.append(f"<b>Раскрыто:</b> {len(opened)}/{len(BUNKER_CARD_FIELDS)} характеристик.")
         if game.bunker_current_actor_user_id == actor_user_id:
             lines.append("")
             lines.append("<i>Ваш ход: выберите характеристику для раскрытия в группе.</i>")
@@ -2494,15 +2665,17 @@ def _render_private_bunker_status_text(game: GroupGame, *, actor_user_id: int) -
             if game.bunker_current_actor_user_id is not None:
                 actor_label = game.players.get(game.bunker_current_actor_user_id, f"user:{game.bunker_current_actor_user_id}")
             lines.append("")
-            lines.append(f"<i>Сейчас раскрывается: {escape(actor_label)}.</i>")
+            lines.append(f"<i>Сейчас раскрывает: {escape(actor_label)}. Дождитесь своего хода: кнопки выбора придут в ЛС.</i>")
     elif game.phase == "bunker_vote":
         voted_count = len({voter for voter in game.bunker_votes if voter in game.alive_player_ids})
         lines.append("")
-        lines.append(f"<i>Идёт голосование. Прогресс: {voted_count}/{len(game.alive_player_ids)}.</i>")
+        lines.append(f"<i>Голосование на выбывание: {voted_count}/{len(game.alive_player_ids)}. Выберите живого игрока; до подсчёта голос можно изменить.</i>")
         current_target = game.bunker_votes.get(actor_user_id)
         if current_target is not None:
             target_label = game.players.get(current_target, f"user:{current_target}")
             lines.append(f"<b>Ваш голос:</b> {escape(target_label)}")
+        else:
+            lines.append("<b>Ваш голос:</b> ещё не отдан.")
     return "\n".join(lines)
 
 
@@ -2572,7 +2745,7 @@ def _render_whoami_private_view(game: GroupGame, *, actor_user_id: int) -> str:
     else:
         lines.append(
             "<i>Если сейчас ваш ход: вопрос — сообщение с «?» в группу. "
-            "Догадка — например: «Я думаю, что я [ответ]».</i>"
+            "Догадка — например: «Я думаю, что я Шрек».</i>"
         )
     return "\n".join(lines)
 
@@ -2589,11 +2762,73 @@ async def _get_bot_username(bot: Bot) -> str:
 
 def _cancel_phase_timer(game_id: str) -> None:
     task = _GAME_PHASE_TASKS.pop(game_id, None)
-    if task is not None and not task.done():
+    # Timers may replace their own task during the bounded private-answer grace.
+    # Cancelling the current task would abort the awaited Telegram board refresh.
+    if task is not None and not task.done() and task is not asyncio.current_task():
         task.cancel()
 
 
-def _schedule_phase_timer(bot: Bot, game: GroupGame, chat_settings: ChatSettings) -> None:
+def _zlob_private_grace_remaining(game: GroupGame, *, now: datetime | None = None) -> float:
+    """Remaining one-off recovery grace, derived from the persisted phase start.
+
+    No process-local counter: a restart cannot reset or indefinitely extend the
+    grace window. Only the original round/phase has this deadline.
+    """
+    started = getattr(game, "phase_started_at", None)
+    if started is None or started.tzinfo is None:
+        return 0.0
+    now = now or datetime.now(timezone.utc)
+    deadline = started + timedelta(
+        seconds=_ZLOBCARDS_PRIVATE_SECONDS + _ZLOBCARDS_RECOVERY_GRACE_SECONDS,
+    )
+    return max(0.0, (deadline - now).total_seconds())
+
+
+def _timer_phase_version(game: GroupGame) -> tuple[str | None, str | None, int | None, datetime | None]:
+    """Immutable phase identity for guarding callbacks after async I/O."""
+    # Older transport stubs may omit optional fields; actual GroupGame always
+    # carries the complete state. Never depend on object identity for fencing.
+    return (
+        getattr(game, "kind", None),
+        getattr(game, "phase", None),
+        getattr(game, "round_no", None),
+        getattr(game, "phase_started_at", None),
+    )
+
+
+def _phase_version_from_transition(
+    transition: tuple,
+    game: GroupGame,
+) -> tuple[str | None, str | None, int | None, datetime | None]:
+    """Prefer the frozen snapshot made before RuntimeGameStore syncs Redis."""
+    return getattr(transition, "phase_version", None) or _timer_phase_version(game)
+
+
+def _schedule_phase_timer_if_current(
+    bot: Bot,
+    game: GroupGame,
+    chat_settings: ChatSettings,
+    expected_phase_version: tuple[str | None, str | None, int | None, datetime | None],
+) -> None:
+    """Only arm a timer for the phase this async handler actually transitioned."""
+    if _timer_phase_version(game) != expected_phase_version:
+        return
+    # The check and scheduling execute without a yield, so a different
+    # callback cannot advance the mutable GroupGame between them.
+    _schedule_phase_timer(bot, game, chat_settings)
+
+
+def _schedule_phase_timer(
+    bot: Bot,
+    game: GroupGame,
+    chat_settings: ChatSettings,
+    *,
+    expected_phase_version: tuple[str, str, int, datetime | None] | None = None,
+) -> None:
+    # Check and cancellation are synchronous: a superseded transition cannot
+    # replace the timer belonging to a newer phase.
+    if expected_phase_version is not None and _timer_phase_version(game) != expected_phase_version:
+        return
     _cancel_phase_timer(game.game_id)
 
     if game.status != "started":
@@ -2634,6 +2869,8 @@ def _schedule_phase_timer(bot: Bot, game: GroupGame, chat_settings: ChatSettings
                         chat_settings,
                         force=True,
                         triggered_by_auto=True,
+                        expected_round_no=expected_round_no,
+                        expected_phase_started_at=expected_phase_started_at,
                     )
                     if error is not None:
                         logger.debug("Zlobcards private timer open skipped", extra={"game_id": game.game_id, "error": error})
@@ -2676,7 +2913,7 @@ def _schedule_phase_timer(bot: Bot, game: GroupGame, chat_settings: ChatSettings
                 await asyncio.sleep(delay)
                 if await _is_stale_timer():
                     return
-                await _advance_mafia_night(bot, game.game_id, chat_settings, triggered_by_timer=True)
+                await _advance_mafia_night(bot, game.game_id, chat_settings, triggered_by_timer=True, expected_round_no=expected_round_no, expected_phase_started_at=expected_phase_started_at)
             except Exception:
                 logger.exception("Failed to advance mafia night timer", extra={"game_id": game.game_id})
 
@@ -2691,7 +2928,7 @@ def _schedule_phase_timer(bot: Bot, game: GroupGame, chat_settings: ChatSettings
                 await asyncio.sleep(delay)
                 if await _is_stale_timer():
                     return
-                await _open_mafia_day_vote(bot, game.game_id, chat_settings, triggered_by_timer=True)
+                await _open_mafia_day_vote(bot, game.game_id, chat_settings, triggered_by_timer=True, expected_round_no=expected_round_no, expected_phase_started_at=expected_phase_started_at)
             except Exception:
                 logger.exception("Failed to advance mafia day discussion timer", extra={"game_id": game.game_id})
 
@@ -2706,7 +2943,7 @@ def _schedule_phase_timer(bot: Bot, game: GroupGame, chat_settings: ChatSettings
                 await asyncio.sleep(delay)
                 if await _is_stale_timer():
                     return
-                await _resolve_mafia_day_vote(bot, game.game_id, chat_settings, triggered_by_timer=True)
+                await _resolve_mafia_day_vote(bot, game.game_id, chat_settings, triggered_by_timer=True, expected_round_no=expected_round_no, expected_phase_started_at=expected_phase_started_at)
             except Exception:
                 logger.exception("Failed to advance mafia vote timer", extra={"game_id": game.game_id})
 
@@ -2721,7 +2958,7 @@ def _schedule_phase_timer(bot: Bot, game: GroupGame, chat_settings: ChatSettings
                 await asyncio.sleep(delay)
                 if await _is_stale_timer():
                     return
-                await _resolve_mafia_execution_confirm(bot, game.game_id, chat_settings, triggered_by_timer=True)
+                await _resolve_mafia_execution_confirm(bot, game.game_id, chat_settings, triggered_by_timer=True, expected_round_no=expected_round_no, expected_phase_started_at=expected_phase_started_at)
             except Exception:
                 logger.exception("Failed to advance mafia execution confirm timer", extra={"game_id": game.game_id})
 
@@ -2741,7 +2978,10 @@ async def restore_phase_timers(bot: Bot, session_factory: Any) -> None:
     from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
 
     active_games = await GAME_STORE.list_active_games()
-    timer_games = [g for g in active_games if g.status == "started" and g.kind in {"mafia", "zlobcards"}]
+    timer_games = [
+        (game, _timer_phase_version(game))
+        for game in active_games if game.status == "started" and game.kind in {"mafia", "zlobcards"}
+    ]
 
     if not timer_games:
         return
@@ -2757,9 +2997,11 @@ async def restore_phase_timers(bot: Bot, session_factory: Any) -> None:
         except Exception:
             pass
 
-        for game in timer_games:
+        for game, expected_phase_version in timer_games:
             try:
                 chat_settings = await repo.get_chat_settings(chat_id=game.chat_id)
+                if _timer_phase_version(game) != expected_phase_version:
+                    continue
                 if chat_settings is None:
                     if settings_obj is not None:
                         chat_settings = default_chat_settings(settings_obj)
@@ -2793,6 +3035,12 @@ async def restore_phase_timers(bot: Bot, session_factory: Any) -> None:
                     continue
 
                 remaining = max(5.0, full_delay - elapsed)
+                if game.kind == "zlobcards" and game.phase == "private_answers" and elapsed >= full_delay:
+                    # An expired original timer gets only the still-remaining
+                    # bounded grace, not another full private-answer window.
+                    # Once past the deadline, one 5s check refreshes the board
+                    # with manual recovery, with no further automatic re-arm.
+                    remaining = max(5.0, full_delay + _ZLOBCARDS_RECOVERY_GRACE_SECONDS - elapsed)
                 logger.info(
                     "Restoring timer for game %s (kind=%s phase=%s elapsed=%.0fs remaining=%.0fs)",
                     game.game_id,
@@ -2802,18 +3050,38 @@ async def restore_phase_timers(bot: Bot, session_factory: Any) -> None:
                     remaining,
                 )
 
-                # Создаём временную версию игры с уменьшенной задержкой через патч настроек
-                # Проще всего — вызвать _schedule_phase_timer с модифицированными settings
-                _cancel_phase_timer(game.game_id)
-                _schedule_phase_timer_with_remaining(bot, game, chat_settings, remaining)
+                # Re-check the snapshot before cancelling another phase's timer.
+                _schedule_phase_timer_with_remaining_if_current(
+                    bot, game, chat_settings, remaining, expected_phase_version,
+                )
             except Exception:
                 logger.exception("Failed to restore timer for game %s", game.game_id)
 
 
+def _schedule_phase_timer_with_remaining_if_current(
+    bot: Bot,
+    game: GroupGame,
+    chat_settings: ChatSettings,
+    remaining_seconds: float,
+    expected_phase_version: tuple[str | None, str | None, int | None, datetime | None],
+) -> None:
+    """Do not replace a newer timer after restore awaited chat settings."""
+    if _timer_phase_version(game) != expected_phase_version:
+        return
+    _schedule_phase_timer_with_remaining(bot, game, chat_settings, remaining_seconds)
+
+
 def _schedule_phase_timer_with_remaining(
-    bot: Bot, game: GroupGame, chat_settings: ChatSettings, remaining_seconds: float
+    bot: Bot,
+    game: GroupGame,
+    chat_settings: ChatSettings,
+    remaining_seconds: float,
+    *,
+    expected_phase_version: tuple[str, str, int, datetime | None] | None = None,
 ) -> None:
     """Запускает таймер фазы с конкретной оставшейся задержкой (используется при восстановлении)."""
+    if expected_phase_version is not None and _timer_phase_version(game) != expected_phase_version:
+        return
     _cancel_phase_timer(game.game_id)
 
     if game.status != "started":
@@ -2844,7 +3112,11 @@ def _schedule_phase_timer_with_remaining(
                 await asyncio.sleep(delay)
                 if await _is_stale_timer():
                     return
-                _, error = await _open_zlob_vote_phase(bot, game.game_id, chat_settings, force=True, triggered_by_auto=True)
+                _, error = await _open_zlob_vote_phase(
+                    bot, game.game_id, chat_settings, force=True, triggered_by_auto=True,
+                    expected_round_no=expected_round_no,
+                    expected_phase_started_at=expected_phase_started_at,
+                )
                 if error is not None:
                     logger.debug("Restored zlobcards private timer skipped", extra={"game_id": game.game_id, "error": error})
             except Exception:
@@ -2868,7 +3140,7 @@ def _schedule_phase_timer_with_remaining(
                 await asyncio.sleep(delay)
                 if await _is_stale_timer():
                     return
-                await _advance_mafia_night(bot, game.game_id, chat_settings, triggered_by_timer=True)
+                await _advance_mafia_night(bot, game.game_id, chat_settings, triggered_by_timer=True, expected_round_no=expected_round_no, expected_phase_started_at=expected_phase_started_at)
             except Exception:
                 logger.exception("Restored mafia night timer failed", extra={"game_id": game.game_id})
 
@@ -2878,7 +3150,7 @@ def _schedule_phase_timer_with_remaining(
                 await asyncio.sleep(delay)
                 if await _is_stale_timer():
                     return
-                await _open_mafia_day_vote(bot, game.game_id, chat_settings, triggered_by_timer=True)
+                await _open_mafia_day_vote(bot, game.game_id, chat_settings, triggered_by_timer=True, expected_round_no=expected_round_no, expected_phase_started_at=expected_phase_started_at)
             except Exception:
                 logger.exception("Restored mafia day discussion timer failed", extra={"game_id": game.game_id})
 
@@ -2888,7 +3160,7 @@ def _schedule_phase_timer_with_remaining(
                 await asyncio.sleep(delay)
                 if await _is_stale_timer():
                     return
-                await _resolve_mafia_day_vote(bot, game.game_id, chat_settings, triggered_by_timer=True)
+                await _resolve_mafia_day_vote(bot, game.game_id, chat_settings, triggered_by_timer=True, expected_round_no=expected_round_no, expected_phase_started_at=expected_phase_started_at)
             except Exception:
                 logger.exception("Restored mafia day vote timer failed", extra={"game_id": game.game_id})
 
@@ -2898,7 +3170,7 @@ def _schedule_phase_timer_with_remaining(
                 await asyncio.sleep(delay)
                 if await _is_stale_timer():
                     return
-                await _resolve_mafia_execution_confirm(bot, game.game_id, chat_settings, triggered_by_timer=True)
+                await _resolve_mafia_execution_confirm(bot, game.game_id, chat_settings, triggered_by_timer=True, expected_round_no=expected_round_no, expected_phase_started_at=expected_phase_started_at)
             except Exception:
                 logger.exception("Restored mafia execution confirm timer failed", extra={"game_id": game.game_id})
 
@@ -2989,7 +3261,10 @@ async def _send_role_to_user(bot: Bot, game: GroupGame, user_id: int) -> bool:
     if game.kind == "mafia":
         lines.append("<i>Идёт мафия. Следите за фазами и анонсами ведущего в групповом чате.</i>")
         if game.phase == "night":
-            lines.append("<i>Сейчас ночь: доступно действие вашей роли.</i>")
+            if _build_private_night_action_keyboard(game, actor_user_id=user_id) is not None:
+                lines.append("<i>Сейчас ночь: ваше действие доступно через кнопки отдельного личного сообщения.</i>")
+            else:
+                lines.append("<i>Сейчас ночь: у вашей роли нет доступного ночного хода. Ожидайте утра.</i>")
         elif game.phase == "day_vote":
             lines.append("<i>Сейчас дневное голосование: бот пришлёт отдельную карточку для голоса в ЛС.</i>")
 
@@ -3101,10 +3376,18 @@ async def _advance_mafia_night(
     economy_repo=None,
     *,
     triggered_by_timer: bool,
-) -> None:
-    game, resolution, error = await GAME_STORE.mafia_resolve_night(game_id=game_id)
+    expected_round_no: int | None = None,
+    expected_phase_started_at: datetime | None = None,
+) -> bool:
+    transition = await GAME_STORE.mafia_resolve_night(
+        game_id=game_id,
+        expected_round_no=expected_round_no,
+        expected_phase_started_at=expected_phase_started_at,
+    )
+    game, resolution, error = transition
     if game is None or resolution is None or error:
-        return
+        return False
+    timer_phase_version = _phase_version_from_transition(transition, game)
 
     note_parts: list[str] = []
     event_parts: list[str] = [f"<b>Ведущий:</b> Ночь {game.round_no} завершена."]
@@ -3150,7 +3433,7 @@ async def _advance_mafia_night(
             include_reveal=True,
         )
         await _send_game_feed_event(bot, game, text="\n".join(event_parts))
-        return
+        return True
 
     note_parts.append("<b>День начался:</b> обсуждение перед голосованием.")
     event_parts.append(
@@ -3159,10 +3442,11 @@ async def _advance_mafia_night(
 
     await _safe_edit_or_send_game_board(bot, game, chat_settings, note="\n".join(note_parts))
     await _send_game_feed_event(bot, game, text="\n".join(event_parts))
-    _schedule_phase_timer(bot, game, chat_settings)
+    _schedule_phase_timer_if_current(bot, game, chat_settings, timer_phase_version)
 
     if triggered_by_timer:
         logger.debug("Mafia night finished by timer", extra={"game_id": game.game_id})
+    return True
 
 
 async def _open_mafia_day_vote(
@@ -3171,10 +3455,18 @@ async def _open_mafia_day_vote(
     chat_settings: ChatSettings,
     *,
     triggered_by_timer: bool,
-) -> None:
-    game, error = await GAME_STORE.mafia_open_day_vote(game_id=game_id)
+    expected_round_no: int | None = None,
+    expected_phase_started_at: datetime | None = None,
+) -> bool:
+    transition = await GAME_STORE.mafia_open_day_vote(
+        game_id=game_id,
+        expected_round_no=expected_round_no,
+        expected_phase_started_at=expected_phase_started_at,
+    )
+    game, error = transition
     if game is None or error:
-        return
+        return False
+    timer_phase_version = _phase_version_from_transition(transition, game)
 
     # No group-wide feed event here (games UX audit, Stage 3 correction #5):
     # "voting is open" is pure current state, already shown on the edited
@@ -3186,10 +3478,11 @@ async def _open_mafia_day_vote(
     note = "<b>Голосование открыто.</b> Проголосовать можно на доске или в ЛС-карточке от бота."
     await _safe_edit_or_send_game_board(bot, game, chat_settings, note=note)
     await _notify_mafia_day_vote_private(bot, game)
-    _schedule_phase_timer(bot, game, chat_settings)
+    _schedule_phase_timer_if_current(bot, game, chat_settings, timer_phase_version)
 
     if triggered_by_timer:
         logger.debug("Mafia day vote opened by timer", extra={"game_id": game.game_id})
+    return True
 
 
 async def _resolve_mafia_day_vote(
@@ -3199,10 +3492,18 @@ async def _resolve_mafia_day_vote(
     economy_repo=None,
     *,
     triggered_by_timer: bool,
-) -> None:
-    game, resolution, error = await GAME_STORE.mafia_resolve_day_vote(game_id=game_id)
+    expected_round_no: int | None = None,
+    expected_phase_started_at: datetime | None = None,
+) -> bool:
+    transition = await GAME_STORE.mafia_resolve_day_vote(
+        game_id=game_id,
+        expected_round_no=expected_round_no,
+        expected_phase_started_at=expected_phase_started_at,
+    )
+    game, resolution, error = transition
     if game is None or resolution is None or error:
-        return
+        return False
+    timer_phase_version = _phase_version_from_transition(transition, game)
 
     protocol_text = _format_day_vote_protocol(game, resolution)
 
@@ -3227,8 +3528,8 @@ async def _resolve_mafia_day_vote(
         await _safe_edit_or_send_game_board(bot, game, chat_settings, note="\n".join(note_parts))
         await _send_game_feed_event(bot, game, text="\n".join(event_parts))
         await _sync_execution_confirm_message(bot, game, force_new=True)
-        _schedule_phase_timer(bot, game, chat_settings)
-        return
+        _schedule_phase_timer_if_current(bot, game, chat_settings, timer_phase_version)
+        return True
 
     if resolution.candidate_user_id is None:
         if resolution.tie:
@@ -3257,19 +3558,20 @@ async def _resolve_mafia_day_vote(
             include_reveal=True,
         )
         await _send_game_feed_event(bot, game, text="\n".join(event_parts))
-        return
+        return True
 
     note_parts.append("<b>Ночь началась:</b> роли с ночным действием получили ЛС-уведомления.")
     event_parts.append(f"<b>Ночь {game.round_no} началась.</b> Роли с действиями получили ЛС-уведомления.")
 
     await _safe_edit_or_send_game_board(bot, game, chat_settings, note="\n".join(note_parts))
     await _send_game_feed_event(bot, game, text="\n".join(event_parts))
-    _schedule_phase_timer(bot, game, chat_settings)
+    _schedule_phase_timer_if_current(bot, game, chat_settings, timer_phase_version)
     failed_dm = await _notify_mafia_night_actions(bot, game)
     await _warn_on_failed_dm(bot, game, failed_dm)
 
     if triggered_by_timer:
         logger.debug("Mafia day vote resolved by timer", extra={"game_id": game.game_id})
+    return True
 
 
 async def _resolve_mafia_execution_confirm(
@@ -3279,13 +3581,21 @@ async def _resolve_mafia_execution_confirm(
     economy_repo=None,
     *,
     triggered_by_timer: bool,
-) -> None:
+    expected_round_no: int | None = None,
+    expected_phase_started_at: datetime | None = None,
+) -> bool:
     game_before_resolve = await GAME_STORE.get_game(game_id)
     confirm_message_id = game_before_resolve.execution_confirm_message_id if game_before_resolve else None
 
-    game, resolution, error = await GAME_STORE.mafia_resolve_execution_confirm(game_id=game_id)
+    transition = await GAME_STORE.mafia_resolve_execution_confirm(
+        game_id=game_id,
+        expected_round_no=expected_round_no,
+        expected_phase_started_at=expected_phase_started_at,
+    )
+    game, resolution, error = transition
     if game is None or resolution is None or error:
-        return
+        return False
+    timer_phase_version = _phase_version_from_transition(transition, game)
 
     if confirm_message_id is not None:
         try:
@@ -3344,19 +3654,20 @@ async def _resolve_mafia_execution_confirm(
             include_reveal=True,
         )
         await _send_game_feed_event(bot, game, text="\n".join(event_parts))
-        return
+        return True
 
     note_parts.append("<b>Ночь началась:</b> роли с ночным действием получили ЛС-уведомления.")
     event_parts.append(f"<b>Ночь {game.round_no} началась.</b> Роли с действиями получили ЛС-уведомления.")
 
     await _safe_edit_or_send_game_board(bot, game, chat_settings, note="\n".join(note_parts))
     await _send_game_feed_event(bot, game, text="\n".join(event_parts))
-    _schedule_phase_timer(bot, game, chat_settings)
+    _schedule_phase_timer_if_current(bot, game, chat_settings, timer_phase_version)
     failed_dm = await _notify_mafia_night_actions(bot, game)
     await _warn_on_failed_dm(bot, game, failed_dm)
 
     if triggered_by_timer:
         logger.debug("Mafia execution confirm resolved by timer", extra={"game_id": game.game_id})
+    return True
 
 
 async def _resolve_quiz_round(
@@ -3367,8 +3678,11 @@ async def _resolve_quiz_round(
     *,
     force: bool,
     triggered_by_auto: bool,
+    expected_question_index: int | None = None,
 ) -> tuple[GroupGame | None, str | None]:
-    game, resolution, error = await GAME_STORE.quiz_resolve_round(game_id=game_id, force=force)
+    game, resolution, error = await GAME_STORE.quiz_resolve_round(
+        game_id=game_id, force=force, expected_question_index=expected_question_index,
+    )
     if game is None:
         return None, "Игра не найдена"
     if error:
@@ -3389,7 +3703,10 @@ async def _resolve_quiz_round(
         next_question_human = (resolution.next_question_index or 0) + 1
         note = f"{round_text}\n<b>Открыт вопрос {next_question_human}.</b>"
         await _safe_edit_or_send_game_board(bot, game, chat_settings, note=note)
-        await _sync_quiz_feed_message(bot, game, question_no=next_question_human)
+        await _sync_quiz_feed_message(
+            bot, game, question_no=next_question_human,
+            expected_question_index=resolution.next_question_index,
+        )
 
     if triggered_by_auto:
         logger.debug("Quiz round resolved automatically", extra={"game_id": game.game_id, "question_index": resolution.question_index})
@@ -3405,8 +3722,9 @@ async def _resolve_bred_round(
     *,
     force: bool,
     triggered_by_auto: bool,
+    expected_round_no: int | None = None,
 ) -> tuple[GroupGame | None, str | None]:
-    game, resolution, error = await GAME_STORE.bred_resolve_round(game_id=game_id, force=force)
+    game, resolution, error = await GAME_STORE.bred_resolve_round(game_id=game_id, force=force, expected_round_no=expected_round_no)
     if game is None:
         return None, "Игра не найдена"
     if error:
@@ -3447,11 +3765,55 @@ async def _open_zlob_vote_phase(
     *,
     force: bool,
     triggered_by_auto: bool,
+    expected_round_no: int | None = None,
+    expected_phase_started_at: datetime | None = None,
 ) -> tuple[GroupGame | None, str | None]:
-    game, error = await GAME_STORE.zlob_open_vote(game_id=game_id, force=force)
+    transition = await GAME_STORE.zlob_open_vote(
+        game_id=game_id, force=force,
+        expected_round_no=expected_round_no,
+        expected_phase_started_at=expected_phase_started_at,
+    )
+    game, error = transition
     if game is None:
         return None, "Игра не найдена"
+    timer_phase_version = _phase_version_from_transition(transition, game)
     if error:
+        if (
+            triggered_by_auto
+            and error == "Нужно минимум два ответа для голосования"
+            and game.kind == "zlobcards"
+            and game.status == "started"
+            and game.phase == "private_answers"
+        ):
+            # A single, restart-safe extension is anchored to the original
+            # phase start and never reset by retries or crashes. An out-of-grace
+            # game stays actionable for players/manager but never spins timers.
+            # RuntimeGameStore may have awaited Redis after returning the
+            # insufficient-answers error. Never extend a subsequent round.
+            if _timer_phase_version(game) != timer_phase_version:
+                return game, error
+            remaining = _zlob_private_grace_remaining(game)
+            if remaining > 0:
+                _schedule_phase_timer_with_remaining_if_current(
+                    bot, game, chat_settings, max(5.0, remaining),
+                    timer_phase_version,
+                )
+            if _timer_phase_version(game) != timer_phase_version:
+                return game, error
+            await _safe_edit_or_send_game_board(
+                bot,
+                game,
+                chat_settings,
+                note=(
+                    "<b>⏳ Время сдачи карточек истекло.</b> "
+                    "Для голосования нужны минимум два ответа. "
+                    "Оставшиеся игроки могут сдать карточки через «Рука в ЛС». "
+                    + ("Есть ещё короткое дополнительное окно для ответов. " if remaining > 0 else "Дополнительное время истекло. ")
+                    + "Когда ответов будет достаточно, ведущий может нажать "
+                    "«Ведущему» → «Открыть голосование»; "
+                    "если партия больше не нужна, её можно завершить."
+                ),
+            )
         return game, error
 
     await _safe_edit_or_send_game_board(
@@ -3460,7 +3822,7 @@ async def _open_zlob_vote_phase(
         chat_settings,
         note="<b>Этап:</b> приватный выбор завершён, открыто голосование.",
     )
-    _schedule_phase_timer(bot, game, chat_settings)
+    _schedule_phase_timer_if_current(bot, game, chat_settings, timer_phase_version)
     if triggered_by_auto:
         logger.debug("Zlobcards vote opened automatically", extra={"game_id": game.game_id})
     return game, None
@@ -3474,14 +3836,17 @@ async def _resolve_zlob_round(
     *,
     force: bool,
     triggered_by_auto: bool,
+    expected_round_no: int | None = None,
 ) -> tuple[GroupGame | None, str | None]:
-    game, resolution, error = await GAME_STORE.zlob_resolve_round(game_id=game_id, force=force)
+    transition = await GAME_STORE.zlob_resolve_round(game_id=game_id, force=force, expected_round_no=expected_round_no)
+    game, resolution, error = transition
     if game is None:
         return None, "Игра не найдена"
     if error:
         return game, error
     if resolution is None:
         return game, "Не удалось обработать голосование"
+    timer_phase_version = _phase_version_from_transition(transition, game)
 
     round_text = _format_zlob_round_resolution(game, resolution)
     if resolution.finished:
@@ -3511,7 +3876,7 @@ async def _resolve_zlob_round(
         chat_settings,
         note="\n".join(note_parts),
     )
-    _schedule_phase_timer(bot, game, chat_settings)
+    _schedule_phase_timer_if_current(bot, game, chat_settings, timer_phase_version)
     if triggered_by_auto:
         logger.debug("Zlobcards round resolved automatically", extra={"game_id": game.game_id})
     return game, None
@@ -3525,8 +3890,9 @@ async def _resolve_bunker_vote(
     *,
     force: bool,
     triggered_by_auto: bool,
+    expected_round_no: int | None = None,
 ) -> tuple[GroupGame | None, str | None]:
-    game, resolution, error = await GAME_STORE.bunker_resolve_vote(game_id=game_id, force=force)
+    game, resolution, error = await GAME_STORE.bunker_resolve_vote(game_id=game_id, force=force, expected_round_no=expected_round_no)
     if game is None:
         return None, "Игра не найдена"
     if error:
@@ -3796,6 +4162,39 @@ async def game_command(message: Message, bot: Bot, command: CommandObject, chat_
         reply_markup=_build_game_controls(game=game, bot_username=bot_username),
     )
     await GAME_STORE.set_message_id(game_id=game.game_id, message_id=sent.message_id)
+
+
+@router.message(Command("gameboard"))
+async def game_board_command(message: Message, bot: Bot, chat_settings: ChatSettings) -> None:
+    """Recover the current public board without requiring manage_games.
+
+    A reply to the existing board is a Telegram-native jump target. Do not
+    clone active keyboards or expose private hands/roles. If the board was
+    deleted, the existing safe board helper recreates its single anchor.
+    """
+    if message.chat.type not in {"group", "supergroup"}:
+        await message.answer("Игровая доска доступна в групповом чате.")
+        return
+
+    game = await GAME_STORE.get_active_game_for_chat(chat_id=message.chat.id)
+    if game is None:
+        await message.answer("Сейчас в этом чате нет активной игры. Ведущий может создать её через /game.")
+        return
+
+    if game.message_id is not None:
+        try:
+            await message.answer(
+                f"🎲 <b>{escape(GAME_DEFINITIONS[game.kind].title)}</b> — "
+                f"{escape(_phase_title(game))}. Нажмите на сообщение, на которое отвечает бот, чтобы перейти к доске.",
+                parse_mode="HTML",
+                reply_to_message_id=game.message_id,
+            )
+            return
+        except TelegramBadRequest:
+            # Message may have been deleted, moved or become unreachable.
+            pass
+
+    await _safe_edit_or_send_game_board(bot, game, chat_settings)
 
 
 @router.callback_query(F.data.startswith("game:new:"))
@@ -4276,11 +4675,24 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
         return
 
     parts = query.data.split(":")
-    if len(parts) != 3:
+    if len(parts) not in {3, 5, 6}:
         await query.answer("Некорректные параметры", show_alert=False)
         return
 
-    _, action, game_id = parts
+    _, action, game_id = parts[:3]
+    confirmation = parts[3:] if len(parts) == 6 and action in {"sok", "rok", "back"} else None
+    versioned_advance = len(parts) == 6 and action == "adv"
+    if len(parts) == 5 or (len(parts) == 6 and not (versioned_advance or confirmation is not None)):
+        await query.answer("Некорректные параметры", show_alert=False)
+        return
+    if confirmation is not None and action not in {"sok", "rok", "back"}:
+        await query.answer("Некорректные параметры", show_alert=False)
+        return
+    if confirmation is None and action in {"sok", "rok", "back"}:
+        await query.answer("Подтверждение устарело. Откройте управление игрой заново.", show_alert=True)
+        return
+    if versioned_advance:
+        action = "advance"
     if action == "new":
         await query.answer()
         return
@@ -4293,6 +4705,19 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
     if query.message.chat.id != game.chat_id:
         await query.answer("Эта кнопка из другого чата", show_alert=False)
         return
+
+    if versioned_advance:
+        expected_phase, expected_round_raw, expected_step_raw = parts[3:]
+        if (
+            not expected_round_raw.isdecimal()
+            or not expected_step_raw.isdecimal()
+            or game.status != "started"
+            or game.phase != expected_phase
+            or game.round_no != int(expected_round_raw)
+            or _manager_advance_step(game) != int(expected_step_raw)
+        ):
+            await query.answer("Фаза игры изменилась. Найдите текущую доску через /gameboard.", show_alert=True)
+            return
 
     actor_id = query.from_user.id
     actor = UserSnapshot(
@@ -4356,6 +4781,22 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
         if game.status != "finished":
             await query.answer("Эта игра ещё не завершена", show_alert=False)
             return
+        # A rematch creates a new game.  Recheck the same permission as /game
+        # on every press, including old keyboards and former lobby owners.
+        allowed = await _actor_can_manage_games(
+            activity_repo,
+            chat_id=game.chat_id,
+            chat_type=query.message.chat.type,
+            chat_title=query.message.chat.title,
+            user=actor,
+            bootstrap_if_missing_owner=False,
+        )
+        if not allowed:
+            await query.answer("Недостаточно прав для запуска игр в этом чате.", show_alert=True)
+            return
+        if game.kind not in GAME_LAUNCHABLE_KINDS:
+            await query.answer("Эта игра больше недоступна для новых запусков.", show_alert=True)
+            return
 
         owner_label = await _resolve_chat_player_label(
             activity_repo,
@@ -4405,7 +4846,29 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
 
     if action == "lrules":
         if game.status != "lobby":
-            await query.answer("Правила доступны до старта игры — используйте кнопку «Моя роль»/доску игры.", show_alert=True)
+            # One group-wide rules message per chat per cooldown, reserved before the
+            # network await so concurrent callbacks cannot flood the same group.
+            now = monotonic()
+            previous = _GAME_RULES_LAST_SENT.get(game.chat_id)
+            if previous is not None and now - previous < _GAME_RULES_COOLDOWN_SECONDS:
+                await query.answer("Правила уже отправлены в этот чат. Посмотрите сообщение выше.", show_alert=True)
+                return
+            _GAME_RULES_LAST_SENT[game.chat_id] = now
+            if len(_GAME_RULES_LAST_SENT) > 1024:
+                _GAME_RULES_LAST_SENT.pop(next(iter(_GAME_RULES_LAST_SENT)))
+            try:
+                await bot.send_message(
+                    chat_id=game.chat_id,
+                    text=_render_game_rules_text(game.kind),
+                    parse_mode="HTML",
+                    disable_notification=True,
+                )
+            except (TelegramBadRequest, TelegramForbiddenError):
+                if _GAME_RULES_LAST_SENT.get(game.chat_id) == now:
+                    _GAME_RULES_LAST_SENT.pop(game.chat_id, None)
+                await query.answer("Не удалось отправить правила. Попробуйте /help.", show_alert=True)
+                return
+            await query.answer("Правила отправлены отдельно — игра продолжается.", show_alert=False)
             return
         try:
             await bot.edit_message_text(
@@ -4426,7 +4889,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
         await query.answer()
         return
 
-    if action in {"cancel", "advance", "reveal"}:
+    if action in {"cancel", "advance", "reveal", "manage", "sok", "rok", "back"}:
         allowed = await _actor_can_manage_games(
             activity_repo,
             chat_id=game.chat_id,
@@ -4438,6 +4901,28 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
         if not allowed:
             await query.answer("Недостаточно прав для управления игрой.", show_alert=False)
             return
+
+    if action == "manage" or (action == "advance" and not versioned_advance):
+        if game.status != "started":
+            await query.answer("Эта партия не активна. Найдите актуальную доску.", show_alert=True)
+            return
+        controls = _build_game_manager_controls(game)
+        if controls is None:
+            await query.answer("Для этого этапа нет управления.", show_alert=False)
+            return
+        await bot.send_message(
+            chat_id=game.chat_id,
+            text=(
+                f"<b>⚙️ Ведущему: {escape(GAME_DEFINITIONS[game.kind].title)}</b>\n"
+                f"<b>Этап:</b> {escape(_phase_title(game))}\n"
+                "Только пользователи с правом управления играми могут менять этап или завершать партию."
+            ),
+            parse_mode="HTML",
+            reply_markup=controls,
+            disable_notification=True,
+        )
+        await query.answer("Кнопки управления открыты отдельно.", show_alert=False)
+        return
 
     if action == "start":
         can_start = await _actor_can_start_game(
@@ -4452,10 +4937,11 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             await query.answer("Старт может нажать создатель лобби или участник с правом управления играми.", show_alert=True)
             return
 
-        started_game, error = await GAME_STORE.start(
+        transition = await GAME_STORE.start(
             game_id=game_id,
             actions_18_enabled=chat_settings.actions_18_enabled,
         )
+        started_game, error = transition
         if started_game is None:
             await query.answer("Игра не найдена", show_alert=False)
             return
@@ -4463,6 +4949,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             await query.answer(error, show_alert=True)
             return
 
+        started_phase_version = _phase_version_from_transition(transition, started_game)
         await _safe_edit_or_send_game_board(bot, started_game, chat_settings)
         await query.answer("Игра началась", show_alert=False)
 
@@ -4471,7 +4958,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             failed_role_dm = await _send_roles_to_private(bot, started_game)
 
         if started_game.kind == "mafia":
-            _schedule_phase_timer(bot, started_game, chat_settings)
+            _schedule_phase_timer_if_current(bot, started_game, chat_settings, started_phase_version)
             failed_night_dm = await _notify_mafia_night_actions(bot, started_game)
             # One combined warning for both DMs (role card + first night's
             # action prompt) instead of two separate messages -- the same
@@ -4497,7 +4984,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             return
 
         if started_game.kind == "zlobcards":
-            _schedule_phase_timer(bot, started_game, chat_settings)
+            _schedule_phase_timer_if_current(bot, started_game, chat_settings, started_phase_version)
             await _send_game_feed_event(
                 bot,
                 started_game,
@@ -4510,7 +4997,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             return
 
         if started_game.kind == "quiz":
-            await _sync_quiz_feed_message(bot, started_game, question_no=1)
+            await _sync_quiz_feed_message(bot, started_game, question_no=1, expected_question_index=0)
             return
 
         if started_game.kind == "bredovukha":
@@ -4541,6 +5028,9 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
         if game.status != "started":
             await query.answer("Игра уже завершена", show_alert=False)
             return
+        # Immutable callback token: subsequent awaits may mutate the GameStore object.
+        advance_phase = parts[3] if versioned_advance else None
+        advance_round = int(parts[4]) if versioned_advance else None
 
         if game.kind == "quiz":
             resolved_game, error = await _resolve_quiz_round(
@@ -4550,6 +5040,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
                 economy_repo=economy_repo,
                 force=True,
                 triggered_by_auto=False,
+                expected_question_index=int(parts[5]) if versioned_advance else None,
             )
             if error:
                 await query.answer(error, show_alert=False)
@@ -4561,8 +5052,8 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             return
 
         if game.kind == "bredovukha":
-            if game.phase == "category_pick":
-                opened_game, category, error = await GAME_STORE.bred_force_pick_category(game_id=game.game_id)
+            if advance_phase == "category_pick":
+                opened_game, category, error = await GAME_STORE.bred_force_pick_category(game_id=game.game_id, expected_round_no=advance_round)
                 if opened_game is None:
                     await query.answer("Игра не найдена", show_alert=False)
                     return
@@ -4588,8 +5079,8 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
                 )
                 return
 
-            if game.phase == "private_answers":
-                opened_game, error = await GAME_STORE.bred_open_vote(game_id=game.game_id, force=True)
+            if advance_phase == "private_answers":
+                opened_game, error = await GAME_STORE.bred_open_vote(game_id=game.game_id, force=True, expected_round_no=advance_round)
                 if opened_game is None:
                     await query.answer("Игра не найдена", show_alert=False)
                     return
@@ -4606,7 +5097,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
                 )
                 return
 
-            if game.phase == "public_vote":
+            if advance_phase == "public_vote":
                 await _safe_callback_answer(query, "Завершаю раунд", show_alert=False)
                 _, error = await _resolve_bred_round(
                     bot,
@@ -4615,6 +5106,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
                     economy_repo=economy_repo,
                     force=True,
                     triggered_by_auto=False,
+                    expected_round_no=advance_round,
                 )
                 if error:
                     await _safe_callback_answer(query, error, show_alert=False)
@@ -4625,13 +5117,14 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             return
 
         if game.kind == "zlobcards":
-            if game.phase == "private_answers":
+            if advance_phase == "private_answers":
                 opened_game, error = await _open_zlob_vote_phase(
                     bot,
                     game.game_id,
                     chat_settings,
                     force=True,
                     triggered_by_auto=False,
+                    expected_round_no=advance_round,
                 )
                 if opened_game is None:
                     await query.answer("Игра не найдена", show_alert=False)
@@ -4639,11 +5132,10 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
                 if error:
                     await query.answer(error, show_alert=False)
                     return
-                _schedule_phase_timer(bot, opened_game, chat_settings)
                 await query.answer("Голосование открыто", show_alert=False)
                 return
 
-            if game.phase == "public_vote":
+            if advance_phase == "public_vote":
                 resolved_game, error = await _resolve_zlob_round(
                     bot,
                     game.game_id,
@@ -4651,12 +5143,11 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
                     economy_repo=economy_repo,
                     force=True,
                     triggered_by_auto=False,
+                    expected_round_no=advance_round,
                 )
                 if error:
                     await query.answer(error, show_alert=False)
                     return
-                if resolved_game is not None and resolved_game.status == "started":
-                    _schedule_phase_timer(bot, resolved_game, chat_settings)
                 await query.answer("Раунд закрыт", show_alert=False)
                 return
 
@@ -4664,8 +5155,12 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             return
 
         if game.kind == "bunker":
-            if game.phase == "bunker_reveal":
-                updated_game, result, error = await GAME_STORE.bunker_force_advance_reveal(game_id=game.game_id)
+            if advance_phase == "bunker_reveal":
+                updated_game, result, error = await GAME_STORE.bunker_force_advance_reveal(
+                    game_id=game.game_id,
+                    expected_round_no=advance_round,
+                    expected_reveal_cursor=int(parts[5]) if versioned_advance else None,
+                )
                 if updated_game is None:
                     await query.answer("Игра не найдена", show_alert=False)
                     return
@@ -4699,7 +5194,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
                 await query.answer("Ход переключён", show_alert=False)
                 return
 
-            if game.phase == "bunker_vote":
+            if advance_phase == "bunker_vote":
                 resolved_game, error = await _resolve_bunker_vote(
                     bot,
                     game.game_id,
@@ -4707,6 +5202,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
                     economy_repo=economy_repo,
                     force=True,
                     triggered_by_auto=False,
+                    expected_round_no=advance_round,
                 )
                 if error:
                     await query.answer(error, show_alert=False)
@@ -4724,84 +5220,182 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             await query.answer("Смена фаз доступна только для мафии, викторины, Бредовухи, Злобных Карт и Бункера", show_alert=False)
             return
 
-        if game.phase == "night":
-            _cancel_phase_timer(game.game_id)
-            await _advance_mafia_night(bot, game.game_id, chat_settings, economy_repo=economy_repo, triggered_by_timer=False)
-            await query.answer("Ночь завершена вручную", show_alert=False)
-            return
-
-        if game.phase == "day_discussion":
-            _cancel_phase_timer(game.game_id)
-            await _open_mafia_day_vote(bot, game.game_id, chat_settings, triggered_by_timer=False)
-            await query.answer("Обсуждение завершено", show_alert=False)
-            return
-
-        if game.phase == "day_vote":
-            _cancel_phase_timer(game.game_id)
-            await _resolve_mafia_day_vote(
-                bot,
-                game.game_id,
-                chat_settings,
-                economy_repo=economy_repo,
-                triggered_by_timer=False,
+        if advance_phase == "night":
+            changed = await _advance_mafia_night(
+                bot, game.game_id, chat_settings, economy_repo=economy_repo,
+                triggered_by_timer=False, expected_round_no=advance_round,
             )
-            await query.answer("Голосование завершено", show_alert=False)
+            await query.answer(
+                "Ночь завершена вручную" if changed else "Действие устарело. Обновите игровую доску.",
+                show_alert=not changed,
+            )
             return
 
-        if game.phase == "day_execution_confirm":
-            _cancel_phase_timer(game.game_id)
-            await _resolve_mafia_execution_confirm(
-                bot,
-                game.game_id,
-                chat_settings,
-                economy_repo=economy_repo,
-                triggered_by_timer=False,
+        if advance_phase == "day_discussion":
+            changed = await _open_mafia_day_vote(
+                bot, game.game_id, chat_settings, triggered_by_timer=False,
+                expected_round_no=advance_round,
             )
-            await query.answer("Подтверждение завершено", show_alert=False)
+            await query.answer(
+                "Обсуждение завершено" if changed else "Действие устарело. Обновите игровую доску.",
+                show_alert=not changed,
+            )
+            return
+
+        if advance_phase == "day_vote":
+            changed = await _resolve_mafia_day_vote(
+                bot, game.game_id, chat_settings, economy_repo=economy_repo,
+                triggered_by_timer=False, expected_round_no=advance_round,
+            )
+            await query.answer(
+                "Голосование завершено" if changed else "Действие устарело. Обновите игровую доску.",
+                show_alert=not changed,
+            )
+            return
+
+        if advance_phase == "day_execution_confirm":
+            changed = await _resolve_mafia_execution_confirm(
+                bot, game.game_id, chat_settings, economy_repo=economy_repo,
+                triggered_by_timer=False, expected_round_no=advance_round,
+            )
+            await query.answer(
+                "Подтверждение завершено" if changed else "Действие устарело. Обновите игровую доску.",
+                show_alert=not changed,
+            )
             return
 
         await query.answer("Сейчас нечего переключать", show_alert=False)
+        return
+
+    if action in {"sok", "rok", "back"}:
+        assert confirmation is not None
+        expected_phase, expected_round_raw, issued_raw = confirmation
+        if not expected_round_raw.isdecimal() or not issued_raw.isdecimal():
+            await query.answer("Некорректное подтверждение", show_alert=True)
+            return
+        expected_round = int(expected_round_raw)
+        issued_at = int(issued_raw)
+        # Dismissing a confirmation is always harmless, even if its phase
+        # has ended or the time window expired.
+        if action == "back":
+            try:
+                await bot.edit_message_text(
+                    chat_id=game.chat_id,
+                    message_id=query.message.message_id,
+                    text="Подтверждение отменено. Основная доска игры не изменена.",
+                )
+            except (TelegramBadRequest, TelegramForbiddenError):
+                pass
+            await query.answer("Отменено", show_alert=False)
+            return
+        now = time()
+        if (
+            now - issued_at > 180 or now < issued_at - 30
+            or game.status != "started"
+            or game.phase != expected_phase
+            or game.round_no != expected_round
+        ):
+            await query.answer("Игра изменилась или подтверждение истекло. Вернитесь к доске через /gameboard.", show_alert=True)
+            return
+        if action == "rok" and game.kind != "spy":
+            await query.answer("Раскрытие доступно только в игре «Шпион».", show_alert=True)
+            return
+
+        # The transition is protected by the GameStore per-game lock. A
+        # concurrent click or phase switch cannot finalize the wrong state.
+        # Capture quiz-feed cleanup targets under the same per-game lock as
+        # finish(); an unlocked snapshot can miss a concurrently published
+        # question. The live-question publisher also deletes late sends.
+        quiz_feed_cleanup_ids: list[int] = []
+        finished_game = await GAME_STORE.finish(
+            game_id=game.game_id,
+            winner_text=(
+                "Игра завершена по решению ведущего."
+                if action == "rok" else "Игра остановлена ведущим."
+            ),
+            expected_status="started",
+            expected_phase=expected_phase,
+            expected_round_no=expected_round,
+            quiz_feed_cleanup_ids=quiz_feed_cleanup_ids,
+        )
+        if finished_game is None:
+            await query.answer("Игра уже изменилась или завершена. Повторное действие не выполнено.", show_alert=True)
+            return
+        _cancel_phase_timer(game.game_id)
+        # A successful confirmation must not leave actionable stop/reveal
+        # buttons behind in the group. Failure to edit cannot undo finish.
+        try:
+            await bot.edit_message_text(
+                chat_id=game.chat_id,
+                message_id=query.message.message_id,
+                text="✅ Роли раскрыты, партия завершена." if action == "rok" else "✅ Партия завершена ведущим.",
+            )
+        except (TelegramBadRequest, TelegramForbiddenError):
+            pass
+        for quiz_feed_message_id in quiz_feed_cleanup_ids:
+            try:
+                await bot.delete_message(chat_id=game.chat_id, message_id=quiz_feed_message_id)
+            except (TelegramBadRequest, TelegramForbiddenError):
+                pass
+
+        await _safe_edit_or_send_game_board(
+            bot, finished_game, chat_settings,
+            include_reveal=(action == "rok" or finished_game.kind in {"spy", "mafia"}),
+        )
+        if action == "rok":
+            event_text = "<b>Ведущий:</b> Игра «Шпион» завершена, роли раскрыты.\n" + _render_roles_reveal(finished_game)
+        else:
+            event_text = "<b>Ведущий:</b> Игра остановлена ведущим."
+            if finished_game.kind in {"spy", "mafia"}:
+                event_text += "\n" + _render_roles_reveal(finished_game)
+        await _send_game_feed_event(bot, finished_game, text=event_text)
+        await query.answer("Роли раскрыты" if action == "rok" else "Игра завершена", show_alert=False)
         return
 
     if action == "reveal":
         if game.kind != "spy" or game.status != "started":
             await query.answer("Раскрытие доступно для активной игры «Шпион»", show_alert=False)
             return
-
-        finished_game = await GAME_STORE.finish(game_id=game.game_id, winner_text="Игра завершена по решению ведущего.")
-        if finished_game is None:
-            await query.answer("Игра не найдена", show_alert=False)
-            return
-
-        await _safe_edit_or_send_game_board(bot, finished_game, chat_settings, include_reveal=True)
-        await _send_game_feed_event(
-            bot,
-            finished_game,
-            text="<b>Ведущий:</b> Игра «Шпион» завершена, роли раскрыты.\n" + _render_roles_reveal(finished_game),
+        await bot.send_message(
+            chat_id=game.chat_id,
+            text="<b>Раскрыть роли?</b> Это немедленно завершит «Шпиона» и покажет роли всем участникам.",
+            parse_mode="HTML",
+            reply_markup=_build_lifecycle_confirmation_keyboard(
+                game=game, action="reveal", issued_at=int(time()),
+            ),
+            disable_notification=True,
         )
-        await query.answer("Роли раскрыты", show_alert=False)
+        await query.answer("Подтвердите раскрытие в отдельном сообщении.", show_alert=False)
         return
 
     if action == "cancel":
-        _cancel_phase_timer(game.game_id)
-        if game.kind == "quiz":
-            await _sync_quiz_feed_message(bot, game, question_no=None)
-        finished_game = await GAME_STORE.finish(game_id=game.game_id, winner_text="Игра остановлена ведущим.")
-        if finished_game is None:
-            await query.answer("Игра не найдена", show_alert=False)
+        if game.status == "started":
+            await bot.send_message(
+                chat_id=game.chat_id,
+                text="<b>Завершить партию?</b> Текущая игра остановится, а результат будет показан в чате.",
+                parse_mode="HTML",
+                reply_markup=_build_lifecycle_confirmation_keyboard(
+                    game=game, action="stop", issued_at=int(time()),
+                ),
+                disable_notification=True,
+            )
+            await query.answer("Подтвердите завершение в отдельном сообщении.", show_alert=False)
+            return
+        if game.status != "lobby":
+            await query.answer("Игра уже завершена. Ничего не изменено.", show_alert=False)
             return
 
-        await _safe_edit_or_send_game_board(
-            bot,
-            finished_game,
-            chat_settings,
-            include_reveal=(finished_game.kind in {"spy", "mafia"}),
+        finished_game = await GAME_STORE.finish(
+            game_id=game.game_id,
+            winner_text="Лобби отменено ведущим.",
+            expected_status="lobby",
+            expected_phase="lobby",
         )
-        event_text = "<b>Ведущий:</b> Игра остановлена ведущим."
-        if finished_game.kind in {"spy", "mafia"}:
-            event_text = f"{event_text}\n{_render_roles_reveal(finished_game)}"
-        await _send_game_feed_event(bot, finished_game, text=event_text)
-        await query.answer("Игра завершена", show_alert=False)
+        if finished_game is None:
+            await query.answer("Лобби уже изменилось. Действие не выполнено.", show_alert=True)
+            return
+        await _safe_edit_or_send_game_board(bot, finished_game, chat_settings)
+        await query.answer("Лобби отменено", show_alert=False)
         return
 
     await query.answer("Неизвестное действие", show_alert=False)
@@ -4814,11 +5408,31 @@ async def quiz_answer_callback(query: CallbackQuery, bot: Bot, chat_settings: Ch
         return
 
     parts = query.data.split(":")
-    if len(parts) != 3:
+    if len(parts) == 3:
+        # Old non-versioned keyboards could submit an answer to a *different*
+        # question after the board changed. Do not guess the round.
+        await query.answer("Кнопка устарела. Откройте текущую доску через /gameboard.", show_alert=True)
+        return
+    if len(parts) != 4 or not parts[2].isdigit():
         await query.answer("Некорректный ответ", show_alert=False)
         return
 
-    _, game_id, payload = parts
+    _, game_id, question_raw, payload = parts
+    question_index = int(question_raw)
+    current_game = await GAME_STORE.get_game(game_id)
+    if current_game is None:
+        await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is None or query.message.chat.id != current_game.chat_id:
+        await query.answer("Эта кнопка из другого чата", show_alert=True)
+        return
+    if (
+        current_game.kind != "quiz" or current_game.status != "started"
+        or current_game.quiz_current_question_index != question_index
+    ):
+        await query.answer("Вопрос уже закрыт. Найдите актуальную доску через /gameboard.", show_alert=True)
+        return
+
     if payload == "noop":
         snapshot_game, answered_count, total_players = await GAME_STORE.quiz_get_answer_snapshot(game_id=game_id)
         if snapshot_game is None:
@@ -4842,6 +5456,8 @@ async def quiz_answer_callback(query: CallbackQuery, bot: Bot, chat_settings: Ch
         game_id=game_id,
         user_id=query.from_user.id,
         option_index=option_index,
+        expected_chat_id=query.message.chat.id,
+        expected_question_index=question_index,
     )
     if error:
         await query.answer(error, show_alert=True)
@@ -4900,17 +5516,24 @@ async def dice_roll_callback(query: CallbackQuery, bot: Bot, chat_settings: Chat
         await query.answer("Неизвестное действие", show_alert=False)
         return
 
-    game, result, error = await GAME_STORE.dice_register_roll(game_id=game_id, user_id=query.from_user.id)
+    current_game = await GAME_STORE.get_game(game_id)
+    if current_game is None:
+        await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is None or query.message.chat.id != current_game.chat_id:
+        await query.answer("Эта кнопка из другого чата", show_alert=True)
+        return
+
+    game, result, error = await GAME_STORE.dice_register_roll(
+        game_id=game_id, user_id=query.from_user.id,
+        expected_chat_id=query.message.chat.id,
+    )
     if error:
         await query.answer(error, show_alert=True)
         return
     if game is None or result is None:
         await query.answer("Игра не найдена", show_alert=False)
         return
-    if query.message is None or query.message.chat.id != game.chat_id:
-        await query.answer("Эта кнопка из другого чата", show_alert=False)
-        return
-
     player_label = game.players.get(query.from_user.id, f"user:{query.from_user.id}")
     note = (
         f"<b>Последний бросок:</b> {_mention(query.from_user.id, player_label)} -> "
@@ -4949,11 +5572,25 @@ async def bred_category_callback(query: CallbackQuery, bot: Bot, chat_settings: 
         return
 
     parts = query.data.split(":")
-    if len(parts) != 3:
+    if len(parts) == 3:
+        await query.answer("Тема прошлого раунда. Откройте /gameboard.", show_alert=True)
+        return
+    if len(parts) != 4 or not parts[2].isdigit():
         await query.answer("Некорректный выбор категории", show_alert=False)
         return
 
-    _, game_id, payload = parts
+    _, game_id, round_raw, payload = parts
+    expected_round = int(round_raw)
+    current_game = await GAME_STORE.get_game(game_id)
+    if current_game is None:
+        await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is None or query.message.chat.id != current_game.chat_id:
+        await query.answer("Эта кнопка из другого чата", show_alert=True)
+        return
+    if current_game.status != "started" or current_game.phase != "category_pick" or current_game.round_no != expected_round:
+        await query.answer("Выбор темы завершён. Откройте /gameboard.", show_alert=True)
+        return
     if payload == "noop":
         game, selector_user_id, options = await GAME_STORE.bred_get_category_snapshot(game_id=game_id)
         if game is None:
@@ -4997,6 +5634,8 @@ async def bred_category_callback(query: CallbackQuery, bot: Bot, chat_settings: 
         game_id=game_id,
         actor_user_id=query.from_user.id,
         option_index=option_index,
+        expected_round_no=expected_round,
+        expected_chat_id=query.message.chat.id,
     )
     if error:
         await query.answer(error, show_alert=True)
@@ -5034,11 +5673,25 @@ async def bred_vote_callback(query: CallbackQuery, bot: Bot, chat_settings: Chat
         return
 
     parts = query.data.split(":")
-    if len(parts) != 3:
+    if len(parts) == 3:
+        await query.answer("Старое голосование. Откройте /gameboard.", show_alert=True)
+        return
+    if len(parts) != 4 or not parts[2].isdigit():
         await query.answer("Некорректное голосование", show_alert=False)
         return
 
-    _, game_id, payload = parts
+    _, game_id, round_raw, payload = parts
+    expected_round = int(round_raw)
+    current_game = await GAME_STORE.get_game(game_id)
+    if current_game is None:
+        await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is None or query.message.chat.id != current_game.chat_id:
+        await query.answer("Эта кнопка из другого чата", show_alert=True)
+        return
+    if current_game.status != "started" or current_game.phase != "public_vote" or current_game.round_no != expected_round:
+        await query.answer("Этот раунд закрыт. Обновите /gameboard.", show_alert=True)
+        return
     if payload == "noop":
         game, voted_count, total_players, vote_tally = await GAME_STORE.bred_get_vote_snapshot(game_id=game_id)
         if game is None:
@@ -5088,6 +5741,8 @@ async def bred_vote_callback(query: CallbackQuery, bot: Bot, chat_settings: Chat
         game_id=game_id,
         voter_user_id=query.from_user.id,
         option_index=option_index,
+        expected_round_no=expected_round,
+        expected_chat_id=query.message.chat.id,
     )
     if error:
         await query.answer(error, show_alert=True)
@@ -5134,11 +5789,27 @@ async def zlob_private_submit_callback(query: CallbackQuery, bot: Bot, chat_sett
         return
 
     parts = query.data.split(":")
-    if len(parts) != 3:
+    if len(parts) == 3:
+        await query.answer("Это старая рука. Откройте /role для актуальных карт.", show_alert=True)
+        return
+    if len(parts) != 4 or not parts[2].isdigit():
         await query.answer("Некорректный выбор карточек", show_alert=False)
         return
 
-    _, game_id, payload = parts
+    _, game_id, round_raw, payload = parts
+    expected_round = int(round_raw)
+    current_game = await GAME_STORE.get_game(game_id)
+    if current_game is None:
+        await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is None or (
+        query.message.chat.type in {"group", "supergroup"} and query.message.chat.id != current_game.chat_id
+    ):
+        await query.answer("Эта кнопка из другого чата", show_alert=True)
+        return
+    if current_game.status != "started" or current_game.phase != "private_answers" or current_game.round_no != expected_round:
+        await query.answer("Эта рука уже неактуальна. Откройте /role.", show_alert=True)
+        return
     existing_game = await GAME_STORE.get_game(game_id)
     if existing_game is not None:
         await _refresh_game_player_label(
@@ -5193,17 +5864,21 @@ async def zlob_private_submit_callback(query: CallbackQuery, bot: Bot, chat_sett
             return
         selected_indexes = (int(payload),)
 
-    game, result, error = await GAME_STORE.zlob_submit_cards(
+    transition = await GAME_STORE.zlob_submit_cards(
         game_id=game_id,
         user_id=query.from_user.id,
         card_indexes=selected_indexes,
+        expected_round_no=expected_round,
+        expected_chat_id=current_game.chat_id,
     )
+    game, result, error = transition
     if error:
         await query.answer(error, show_alert=True)
         return
     if game is None or result is None:
         await query.answer("Игра не найдена", show_alert=False)
         return
+    timer_phase_version = _phase_version_from_transition(transition, game)
     if query.message is not None and query.message.chat.type in {"group", "supergroup"} and query.message.chat.id != game.chat_id:
         await query.answer("Эта кнопка из другого чата", show_alert=False)
         return
@@ -5220,7 +5895,10 @@ async def zlob_private_submit_callback(query: CallbackQuery, bot: Bot, chat_sett
                 raise
 
     if result.vote_opened:
-        _cancel_phase_timer(game.game_id)
+        # A final early submission transitions the phase inside GameStore.
+        # Replace the private-answer timer with a voting timer; simply
+        # cancelling here previously left public_vote open indefinitely.
+        _schedule_phase_timer_if_current(bot, game, chat_settings, timer_phase_version)
         await _safe_edit_or_send_game_board(
             bot,
             game,
@@ -5254,11 +5932,25 @@ async def zlob_vote_callback(query: CallbackQuery, bot: Bot, chat_settings: Chat
         return
 
     parts = query.data.split(":")
-    if len(parts) != 3:
+    if len(parts) == 3:
+        await query.answer("Голосование прошлого раунда. Откройте /gameboard.", show_alert=True)
+        return
+    if len(parts) != 4 or not parts[2].isdigit():
         await query.answer("Некорректное голосование", show_alert=False)
         return
 
-    _, game_id, payload = parts
+    _, game_id, round_raw, payload = parts
+    expected_round = int(round_raw)
+    current_game = await GAME_STORE.get_game(game_id)
+    if current_game is None:
+        await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is None or query.message.chat.id != current_game.chat_id:
+        await query.answer("Эта кнопка из другого чата", show_alert=True)
+        return
+    if current_game.status != "started" or current_game.phase != "public_vote" or current_game.round_no != expected_round:
+        await query.answer("Этот раунд закрыт. Обновите /gameboard.", show_alert=True)
+        return
     existing_game = await GAME_STORE.get_game(game_id)
     if existing_game is not None:
         await _refresh_game_player_label(
@@ -5309,6 +6001,8 @@ async def zlob_vote_callback(query: CallbackQuery, bot: Bot, chat_settings: Chat
         game_id=game_id,
         voter_user_id=query.from_user.id,
         option_index=option_index,
+        expected_round_no=expected_round,
+        expected_chat_id=query.message.chat.id,
     )
     if error:
         await query.answer(error, show_alert=True)
@@ -5361,11 +6055,26 @@ async def bunker_reveal_callback(query: CallbackQuery, bot: Bot, chat_settings: 
         return
 
     parts = query.data.split(":")
-    if len(parts) != 3:
+    if len(parts) == 3:
+        await query.answer("Эта карточка устарела. Откройте /role.", show_alert=True)
+        return
+    if len(parts) != 5 or not parts[2].isdigit() or not parts[3].isdigit():
         await query.answer("Некорректное раскрытие", show_alert=False)
         return
 
-    _, game_id, payload = parts
+    _, game_id, round_raw, cursor_raw, payload = parts
+    expected_round, expected_cursor = int(round_raw), int(cursor_raw)
+    current_game = await GAME_STORE.get_game(game_id)
+    if current_game is None:
+        await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is None or query.message.chat.type != "private":
+        await query.answer("Раскрывайте поля только в личке.", show_alert=True)
+        return
+    if (current_game.status != "started" or current_game.phase != "bunker_reveal"
+            or current_game.round_no != expected_round or current_game.bunker_reveal_cursor != expected_cursor):
+        await query.answer("Ход уже завершён. Откройте /role.", show_alert=True)
+        return
     if payload == "noop":
         game, current_index, total_in_round, current_actor_user_id = await GAME_STORE.bunker_get_reveal_snapshot(game_id=game_id)
         if game is None:
@@ -5400,6 +6109,9 @@ async def bunker_reveal_callback(query: CallbackQuery, bot: Bot, chat_settings: 
         game_id=game_id,
         actor_user_id=query.from_user.id,
         field_key=payload,
+        expected_round_no=expected_round,
+        expected_reveal_cursor=expected_cursor,
+        expected_chat_id=current_game.chat_id,
     )
     if error:
         await query.answer(error, show_alert=True)
@@ -5460,11 +6172,15 @@ async def bunker_vote_callback(query: CallbackQuery, bot: Bot, chat_settings: Ch
         return
 
     parts = query.data.split(":")
-    if len(parts) != 3:
+    if len(parts) == 3:
+        await query.answer("Это действие устарело. Откройте /gameboard.", show_alert=True)
+        return
+    if len(parts) != 4 or not parts[2].isdigit():
         await query.answer("Некорректное голосование", show_alert=False)
         return
 
-    _, game_id, payload = parts
+    _, game_id, round_raw, payload = parts
+    expected_round = int(round_raw)
     if payload == "noop":
         game, voted_count, total_alive, leader_user_id, leader_votes = await GAME_STORE.bunker_get_vote_snapshot(game_id=game_id)
         if game is None:
@@ -5499,10 +6215,19 @@ async def bunker_vote_callback(query: CallbackQuery, bot: Bot, chat_settings: Ch
         return
 
     target_user_id = int(payload)
+    current_game = await GAME_STORE.get_game(game_id)
+    if current_game is None:
+        await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is None or query.message.chat.type != "private":
+        await query.answer("Голосование «Бункера» доступно только в ЛС.", show_alert=True)
+        return
     game, previous_target_user_id, error = await GAME_STORE.bunker_register_vote(
         game_id=game_id,
         voter_user_id=query.from_user.id,
         target_user_id=target_user_id,
+        expected_round_no=expected_round,
+        expected_chat_id=current_game.chat_id,
     )
     if error:
         await query.answer(error, show_alert=True)
@@ -5564,11 +6289,15 @@ async def whoami_answer_callback(query: CallbackQuery, bot: Bot, chat_settings: 
         return
 
     parts = query.data.split(":")
-    if len(parts) != 3:
+    if len(parts) == 3:
+        await query.answer("Этот вопрос устарел. Откройте /gameboard.", show_alert=True)
+        return
+    if len(parts) != 4 or not parts[2].isdigit():
         await query.answer("Некорректный ответ", show_alert=False)
         return
 
-    _, game_id, answer_code = parts
+    _, game_id, revision_raw, answer_code = parts
+    expected_question_version = int(revision_raw)
     if answer_code not in {"yes", "no", "unknown", "irrelevant"}:
         await query.answer("Некорректный ответ", show_alert=False)
         return
@@ -5576,6 +6305,9 @@ async def whoami_answer_callback(query: CallbackQuery, bot: Bot, chat_settings: 
     current_game = await GAME_STORE.get_game(game_id)
     if current_game is None:
         await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is None or query.message.chat.id != current_game.chat_id:
+        await query.answer("Эта кнопка из другого чата", show_alert=True)
         return
     await _refresh_game_player_label(
         activity_repo,
@@ -5591,6 +6323,8 @@ async def whoami_answer_callback(query: CallbackQuery, bot: Bot, chat_settings: 
         game_id=game_id,
         responder_user_id=query.from_user.id,
         answer_code=answer_code,  # type: ignore[arg-type]
+        expected_question_version=expected_question_version,
+        expected_chat_id=query.message.chat.id,
     )
     if error:
         await query.answer(error, show_alert=True)
@@ -5623,6 +6357,29 @@ async def spy_vote_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatS
         return
 
     _, game_id, payload = parts
+    current_game = await GAME_STORE.get_game(game_id)
+    if current_game is None:
+        await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is None or query.message.chat.id != current_game.chat_id:
+        await query.answer("Эта кнопка из другого чата", show_alert=True)
+        return
+    if payload == "mine":
+        if current_game.status != "started" or current_game.kind != "spy":
+            await query.answer("Партия уже завершена. Откройте актуальную доску.", show_alert=True)
+            return
+        if query.from_user.id not in current_game.players:
+            await query.answer("Вы не участвуете в этой игре.", show_alert=True)
+            return
+        target = current_game.spy_votes.get(query.from_user.id)
+        if target is None:
+            await query.answer("Вы ещё не голосовали. Выберите подозреваемого.", show_alert=True)
+        else:
+            await query.answer(
+                f"Ваш голос: {current_game.players.get(target, f'user:{target}')}. Пока игра идёт, выбор можно изменить.",
+                show_alert=True,
+            )
+        return
     if payload == "noop":
         game, voted_count, total_players, leader_user_id, leader_votes = await GAME_STORE.spy_get_vote_snapshot(game_id=game_id)
         if game is None:
@@ -5652,6 +6409,7 @@ async def spy_vote_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatS
         game_id=game_id,
         voter_user_id=query.from_user.id,
         target_user_id=target_user_id,
+        expected_chat_id=query.message.chat.id,
     )
     if error:
         await query.answer(error, show_alert=True)
@@ -5659,10 +6417,6 @@ async def spy_vote_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatS
     if game is None:
         await query.answer("Игра не найдена", show_alert=False)
         return
-    if query.message is None or query.message.chat.id != game.chat_id:
-        await query.answer("Эта кнопка из другого чата", show_alert=False)
-        return
-
     target_label = game.players.get(target_user_id, f"user:{target_user_id}")
     voter_label = game.players.get(query.from_user.id, f"user:{query.from_user.id}")
 
@@ -5726,11 +6480,18 @@ async def mafia_night_action_callback(query: CallbackQuery, bot: Bot, chat_setti
         return
 
     parts = query.data.split(":")
-    if len(parts) != 3:
+    if len(parts) == 3:
+        await query.answer("Это действие устарело. Откройте /role.", show_alert=True)
+        return
+    if len(parts) != 4 or not parts[2].isdigit():
         await query.answer("Некорректное действие", show_alert=False)
         return
 
-    _, game_id, target_raw = parts
+    _, game_id, round_raw, target_raw = parts
+    expected_round = int(round_raw)
+    if query.message is None or query.message.chat.type != "private":
+        await query.answer("Ночные действия только в ЛС.", show_alert=True)
+        return
     if not target_raw.isdigit():
         await query.answer("Некорректная цель", show_alert=False)
         return
@@ -5740,6 +6501,7 @@ async def mafia_night_action_callback(query: CallbackQuery, bot: Bot, chat_setti
         game_id=game_id,
         actor_user_id=query.from_user.id,
         target_user_id=target_user_id,
+        expected_round_no=expected_round,
     )
     if error:
         await query.answer(error, show_alert=True)
@@ -5790,13 +6552,28 @@ async def mafia_day_vote_callback(query: CallbackQuery, bot: Bot, chat_settings:
         return
 
     parts = query.data.split(":")
-    if len(parts) != 3:
+    if len(parts) == 3:
+        await query.answer("Это действие устарело. Откройте /gameboard.", show_alert=True)
+        return
+    if len(parts) != 4 or not parts[2].isdigit():
         await query.answer("Некорректное голосование", show_alert=False)
         return
 
-    _, game_id, target_raw = parts
+    _, game_id, round_raw, target_raw = parts
+    expected_round = int(round_raw)
     if not target_raw.isdigit():
         await query.answer("Некорректная цель", show_alert=False)
+        return
+
+    current_game = await GAME_STORE.get_game(game_id)
+    if current_game is None:
+        await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is None or (
+        query.message.chat.type in {"group", "supergroup"}
+        and query.message.chat.id != current_game.chat_id
+    ):
+        await query.answer("Эта кнопка из другого чата", show_alert=True)
         return
 
     target_user_id = int(target_raw)
@@ -5804,6 +6581,7 @@ async def mafia_day_vote_callback(query: CallbackQuery, bot: Bot, chat_settings:
         game_id=game_id,
         voter_user_id=query.from_user.id,
         target_user_id=target_user_id,
+        expected_round_no=expected_round,
     )
     if error:
         await query.answer(error, show_alert=True)
@@ -5877,11 +6655,25 @@ async def mafia_execution_confirm_callback(query: CallbackQuery, bot: Bot, chat_
         return
 
     parts = query.data.split(":")
-    if len(parts) != 3:
+    if len(parts) == 3:
+        await query.answer("Подтверждение устарело. Откройте /gameboard.", show_alert=True)
+        return
+    if len(parts) != 4 or not parts[2].isdigit():
         await query.answer("Некорректное подтверждение", show_alert=False)
         return
 
-    _, game_id, decision_raw = parts
+    _, game_id, round_raw, decision_raw = parts
+    expected_round = int(round_raw)
+    current_game = await GAME_STORE.get_game(game_id)
+    if current_game is None:
+        await query.answer("Игра не найдена", show_alert=False)
+        return
+    if query.message is None or query.message.chat.id != current_game.chat_id:
+        await query.answer("Подтверждайте казнь в исходной группе.", show_alert=True)
+        return
+    if current_game.status != "started" or current_game.phase != "day_execution_confirm" or current_game.round_no != expected_round:
+        await query.answer("Голосование завершено. Откройте /gameboard.", show_alert=True)
+        return
     if decision_raw == "noop":
         snapshot_game, voted_count, alive_count, yes_count, no_count = await GAME_STORE.mafia_get_execution_confirm_snapshot(game_id=game_id)
         if snapshot_game is None:
@@ -5906,6 +6698,7 @@ async def mafia_execution_confirm_callback(query: CallbackQuery, bot: Bot, chat_
         game_id=game_id,
         voter_user_id=query.from_user.id,
         approve=approve,
+        expected_round_no=expected_round,
     )
     if error:
         await query.answer(error, show_alert=True)
@@ -6047,7 +6840,19 @@ async def bred_private_answer_handler(message: Message, bot: Bot, chat_settings:
         raise SkipHandler()
 
     game = await GAME_STORE.get_latest_bred_submission_game_for_user(user_id=message.from_user.id)
-    if not _should_handle_bred_private_answer(game, text=text):
+    replied = getattr(message, "reply_to_message", None)
+    replied_prompt = (
+        (getattr(replied, "text", None) or getattr(replied, "caption", None) or "")
+        if replied is not None else None
+    )
+    if (
+        game is not None and replied_prompt is not None
+        and "Контекст блефа:" in replied_prompt
+        and f"Контекст блефа: {game.game_id}/{game.round_no}" not in replied_prompt
+    ):
+        await message.answer("Это старый вопрос «Бредовухи». Откройте актуальный через /role.")
+        return
+    if not _should_handle_bred_private_answer(game, text=text, replied_prompt=replied_prompt):
         raise SkipHandler()
 
     await _refresh_game_player_label(
@@ -6078,7 +6883,12 @@ async def bred_private_answer_handler(message: Message, bot: Bot, chat_settings:
     else:
         status_text = "Ответ обновлён."
 
-    await message.answer(f"{status_text}\nПрогресс: {result.submitted_count}/{result.total_players}.")
+    await message.answer(
+        f"{status_text} Раунд {updated_game.round_no}/{updated_game.bred_rounds} "
+        f"в чате «{updated_game.chat_title or updated_game.chat_id}».\n"
+        f"Прогресс: {result.submitted_count}/{result.total_players}. "
+        + ("Все сдали — переходите к голосованию в группу." if result.vote_opened else "Ожидаем остальных; ответ можно заменить.")
+    )
 
     if result.vote_opened:
         await _safe_edit_or_send_game_board(

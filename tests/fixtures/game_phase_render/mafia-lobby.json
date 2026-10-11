@@ -1,0 +1,55 @@
+{
+  "text_lines": [
+    "<b>Мини-мафия</b>",
+    "<i>Ночь/день/голосование, скрытые роли и легальная победа по правилам.</i>",
+    "<b>Этап:</b> Набор игроков",
+    "<b>Игроков:</b> 4",
+    "<b>Создатель лобби:</b> <a href=\"tg://user?id=1\">Аня &lt;&amp;&gt; 🦊</a>",
+    "",
+    "<b>Лобби (4):</b>",
+    "1. <a href=\"tg://user?id=1\">Аня &lt;&amp;&gt; 🦊</a>",
+    "2. <a href=\"tg://user?id=2\">Игрок 2</a>",
+    "3. <a href=\"tg://user?id=3\">Игрок 3</a>",
+    "4. <a href=\"tg://user?id=4\">Игрок 4</a>",
+    "<b>Роль выбывшего:</b> показывать"
+  ],
+  "public_keyboard": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "➕ Присоединиться",
+          "callback_data": "game:join:fixture"
+        },
+        {
+          "text": "➖ Покинуть",
+          "callback_data": "game:leave:fixture"
+        }
+      ],
+      [
+        {
+          "text": "❓ Как играть",
+          "callback_data": "game:lrules:fixture"
+        }
+      ],
+      [
+        {
+          "text": "🎭 Роль выбывшего: вкл",
+          "callback_data": "gcfg:fixture:reveal_elim"
+        }
+      ],
+      [
+        {
+          "text": "🎬 Старт",
+          "callback_data": "game:start:fixture"
+        },
+        {
+          "text": "🛑 Отменить",
+          "callback_data": "game:cancel:fixture"
+        }
+      ]
+    ]
+  },
+  "manager_keyboard": null,
+  "execution_prompt_lines": null,
+  "execution_keyboard": null
+}

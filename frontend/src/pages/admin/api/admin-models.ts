@@ -27,7 +27,7 @@ async function save(url: string, payload: unknown, create = false) {
       const message = typeof data?.message === 'string' && data.message.trim()
         ? data.message
         : typeof data?.detail === 'string' && data.detail.trim() ? data.detail : null
-      throw new Error(message ?? 'Проверьте поля формы. Не удалось сохранить конфигурацию.')
+      throw new Error(message ?? 'Проверьте поля формы. Не удалось сохранить конфигурацию.', { cause: error })
     }
     throw error
   }
@@ -61,8 +61,8 @@ export async function saveQuotaMode(payload: {
     if (isAxiosError(error)) {
       const detail = error.response?.data?.detail ?? error.response?.data?.message
       const message = typeof detail === 'string' && detail.trim() ? detail : 'Не удалось сохранить систему лимитов.'
-      if (error.response?.status === 409) throw new ConfirmationRequired(message)
-      throw new Error(message)
+      if (error.response?.status === 409) throw new ConfirmationRequired(message, { cause: error })
+      throw new Error(message, { cause: error })
     }
     throw error
   }

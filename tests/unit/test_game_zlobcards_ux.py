@@ -44,7 +44,7 @@ def test_private_answers_phase_separates_state_from_action() -> None:
     game = _zlob_game(phase="private_answers", zlob_black_text="Чёрная карта __", zlob_black_slots=1)
     text = game_router._render_game_text(game, _chat_settings())
     assert "<b>Сейчас:</b> сбор карт в ЛС." in text
-    assert "<b>Что делать:</b> выберите карту(ы) из руки" in text
+    assert "<b>Что делать:</b> откройте ЛС: чёрная карта задаёт" in text
 
 
 def test_public_vote_phase_separates_state_from_action() -> None:

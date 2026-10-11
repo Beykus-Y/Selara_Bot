@@ -1,50 +1,64 @@
 from __future__ import annotations
 
+from html import escape
+
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from selara.application.ai_character.group import (
-    MAX_GROUP_CUSTOM_LENGTH,
     FREE_CALL_NAMES,
+    MAX_GROUP_CUSTOM_LENGTH,
     MAX_MEMBER_TEXT_LENGTH,
     PAID_CALL_NAMES,
 )
 from selara.application.feature_access import resolve_feature_policy
-from selara.application.model_catalog import PROFILE_DESCRIPTIONS, PROFILE_EMOJI, PROFILE_NAMES, PROFILE_ORDER
+from selara.application.model_catalog import (
+    PROFILE_DESCRIPTIONS,
+    PROFILE_EMOJI,
+    PROFILE_NAMES,
+    PROFILE_ORDER,
+)
 from selara.core.chat_settings import ChatSettings
 from selara.core.config import Settings
 from selara.infrastructure.llm.features import AiFeature
 from selara.presentation.commands.command_catalog import GAME_RULES_RU, get_command_spec
+from selara.presentation.handlers.settings_common import split_html_message
+from selara.presentation.navigation.cards import FEATURE_CARDS
+from selara.presentation.navigation.contract import (
+    BACK_LABEL,
+    NAV_CALLBACK_PREFIX,
+    SECTIONS_LABEL,
+)
+from selara.presentation.navigation.render import feature_block
+from selara.presentation.navigation.tree import (
+    ROOT_KEY,
+    NavNode,
+    get_nav_node,
+    nav_callback,
+)
 
 router = Router(name="help")
 
-_HELP_SECTIONS_ORDER: tuple[tuple[str, str], ...] = (
-    ("stats", "📊 Статистика"),
-    ("games", "🎮 Игры"),
-    ("economy", "💰 Экономика"),
-    ("relationships", "💞 Отношения"),
-    ("social", "🤝 Социальное"),
-    ("pets", "🐾 Питомцы"),
-    ("ai", "🤖 AI в группе"),
-    ("ai_plus", "💎 Подписка и итоги"),
-    ("models", "🧠 Модели и лимиты"),
-    ("moderation", "🛡 Модерация"),
-    ("settings", "⚙️ Настройки"),
-)
+# Telegram caps a message at 4096 characters; stay well under it.
+_PAGE_MAX_LEN = 3500
 
-_HELP_GAMES_ORDER: tuple[tuple[str, str], ...] = (
-    ("zlobcards", "🃏 500 Злобных Карт"),
-    ("spy", "🕵️ Найди шпиона"),
-    ("whoami", "🎭 Кто я"),
-    ("mafia", "🕴 Мафия"),
-    ("dice", "🎲 Дуэль кубиков"),
-    ("quiz", "❓ Викторина"),
-    ("bredovukha", "🧠 Бредовуха"),
-    ("bunker", "🏚 Бункер"),
-)
+# Old help:<key> callbacks (still sitting in chats) and where their content lives now.
+_LEGACY_HELP_KEYS: dict[str, str] = {
+    "home": ROOT_KEY,
+    "stats": "profile",
+    "relationships": "couples",
+    "ai": "ai_group",
+    "ai_plus": "subscriptions",
+    "models": "ai_models",
+    "settings": "admin_settings",
+}
 
 def _base_words(*keys: str) -> list[str]:
     """Base command words (e.g. "/farm plant <культура>" -> "/farm") for a
@@ -69,17 +83,19 @@ def _code_join(words: list[str]) -> str:
 
 
 _HELP_SECTION_TEXT: dict[str, str] = {
-    "stats": (
+    "profile": (
         "<b>Статистика</b>\n"
         f"• {_code_join(_base_words('stats_profile'))} — профиль, карма и своё описание\n"
         f"• {_code_join(_base_words('stats_leaderboards'))} — топ пользователей и активности "
         "(<code>karma</code>, <code>гибрид</code>, <code>неделя|сутки|час|месяц</code>)\n"
         f"• {_code_join(_base_words('misc_lastseen'))} — когда был активен\n"
-        f"• {_code_join(_base_words('stats_achievements'))} — достижения и награды"
+        f"• {_code_join(_base_words('stats_achievements'))} — достижения и награды\n"
+        "• С телефона: Mini App из <code>/start</code> в личке\n"
+        "• С ПК: <code>/login</code> в личке выдаёт одноразовый код для /app"
     ),
     "games": (
         "<b>Игры</b>\n"
-        "Выберите конкретную игру кнопками ниже — покажу описание и правила.\n"
+        "Выберите группу игр, затем игру: правила и порядок партии — на её экране.\n"
         f"• {_code_join(_base_words('games_lobby'))} — открыть меню игр\n"
         f"• {_code_join(_base_words('games_role_reveal'))} — узнать свою роль (для скрытых игр)\n"
         "• Лобби запускает создатель или участник с правом управления играми"
@@ -92,7 +108,7 @@ _HELP_SECTION_TEXT: dict[str, str] = {
         f"• {_code_join(_base_words('economy_market_transfer_auction'))}\n"
         f"• Кнопки панели персональные: другим нужно открыть свою через {_code_join(_base_words('economy_panel')[:1])}"
     ),
-    "relationships": (
+    "couples": (
         "<b>Отношения</b>\n"
         "• <code>мои отношения</code> / <code>/relation</code> — статус, кулдауны и кнопки действий\n"
         "• <code>мой брак</code> — отдельная карточка активного брака\n"
@@ -135,7 +151,7 @@ _HELP_SECTION_TEXT: dict[str, str] = {
         f"• {_code_join(_base_words('admin_role_definitions') + _base_words('admin_role_custom')[:1])}\n"
         "• Без <code>/</code>: пред / варн / снять пред / снять варн / бан / снять бан — по reply или с <code>@username/id</code>"
     ),
-    "settings": (
+    "admin_settings": (
         "<b>Настройки и алиасы</b>\n"
         f"• {_code_join(_base_words('misc_public_service_commands')[1:2])} — текущие настройки\n"
         f"• {_code_join(_base_words('admin_settings_tools')[:1])} key value — изменить настройку\n"
@@ -146,9 +162,7 @@ _HELP_SECTION_TEXT: dict[str, str] = {
         "• Selara в чате: <code>/selara</code> — клички («Селя, ...»), характер и ответы участникам\n"
         "• ЛС-панель: <code>/start</code> в личке\n"
         "• Selara AI: <code>/premium</code> в личке — выбрать чат и оформить доступ\n"
-        "• Условия и помощь по оплате: <code>/terms</code>, <code>/paysupport</code>\n"
-        "• С телефона: Mini App из <code>/start</code> в личке\n"
-        "• С ПК: <code>/login</code> в личке выдаёт одноразовый код для /app"
+        "• Условия и помощь по оплате: <code>/terms</code>, <code>/paysupport</code>"
     ),
 }
 
@@ -283,111 +297,154 @@ def _models_help_text(settings: Settings) -> str:
     )
 
 
-def _help_callback_data(*, section: str, owner_user_id: int | None) -> str:
-    if owner_user_id is None:
-        return f"help:{section}"
-    return f"help:{section}:u{owner_user_id}"
+def _strip_owner_suffix(payload: str) -> str:
+    """Buttons sent before help became public carry a `:u<owner_id>` suffix; drop it so they keep working."""
+    head, separator, tail = payload.rpartition(":u")
+    if separator and tail.isdigit():
+        return head
+    return payload
 
 
-def _parse_help_callback_data(data: str | None) -> tuple[str, int | None]:
-    if not data or not data.startswith("help:"):
-        return "home", None
-
-    payload = data[5:]
-    if not payload:
-        return "home", None
-
-    owner_user_id: int | None = None
-    section = payload
-    possible_owner_split = payload.rsplit(":u", maxsplit=1)
-    if len(possible_owner_split) == 2 and possible_owner_split[1].isdigit():
-        section = possible_owner_split[0]
-        owner_user_id = int(possible_owner_split[1])
-
-    return (section or "home"), owner_user_id
-
-
-def _build_help_keyboard(*, section: str | None, owner_user_id: int | None) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    if section is None:
-        for key, title in _HELP_SECTIONS_ORDER:
-            builder.button(text=title, callback_data=_help_callback_data(section=key, owner_user_id=owner_user_id))
-        builder.adjust(2, 2, 2, 2, 2, 1)
-        return builder.as_markup()
-
-    if section == "games":
-        for key, title in _HELP_GAMES_ORDER:
-            builder.button(
-                text=title,
-                callback_data=_help_callback_data(section=f"game_{key}", owner_user_id=owner_user_id),
-            )
-        builder.button(text="🏠 Главное", callback_data=_help_callback_data(section="home", owner_user_id=owner_user_id))
-        builder.adjust(2)
-        return builder.as_markup()
-
-    if section.startswith("game_"):
-        current_game_key = section[5:]
-        for key, title in _HELP_GAMES_ORDER:
-            marker = " •" if key == current_game_key else ""
-            builder.button(
-                text=f"{title}{marker}",
-                callback_data=_help_callback_data(section=f"game_{key}", owner_user_id=owner_user_id),
-            )
-        builder.button(text="🎮 К играм", callback_data=_help_callback_data(section="games", owner_user_id=owner_user_id))
-        builder.button(text="🏠 Главное", callback_data=_help_callback_data(section="home", owner_user_id=owner_user_id))
-        builder.adjust(2)
-        return builder.as_markup()
-
-    for key, title in _HELP_SECTIONS_ORDER:
-        marker = " •" if key == section else ""
-        builder.button(
-            text=f"{title}{marker}",
-            callback_data=_help_callback_data(section=key, owner_user_id=owner_user_id),
-        )
-    builder.button(text="🏠 Главное", callback_data=_help_callback_data(section="home", owner_user_id=owner_user_id))
-    builder.adjust(2, 2, 2, 2, 2, 2)
-    return builder.as_markup()
-
-
-def _main_help_text(settings: Settings) -> str:
-    return (
-        f"<b>{settings.bot_name}</b>\n"
-        "Короткая навигация по командам.\n"
-        "Выберите раздел кнопками ниже."
-    )
-
-
-def _section_help_text(settings: Settings, section: str) -> str:
-    if section.startswith("game_"):
-        game_key = section[5:]
-        game_text = GAME_RULES_RU.get(game_key)
-        if game_text is None:
-            return _main_help_text(settings)
-        return f"<b>{settings.bot_name}</b>\n\n{game_text}"
-
-    if section == "ai":
-        body: str | None = _ai_help_text(settings)
-    elif section == "ai_plus":
-        body = _ai_plus_help_text(settings)
-    elif section == "models":
-        body = _models_help_text(settings)
+def _resolve_node_key(data: str | None) -> str:
+    """Catalog node a callback points at. Empty, unknown or foreign payloads open the root."""
+    if not data:
+        return ROOT_KEY
+    prefix, _, payload = data.partition(":")
+    if prefix == NAV_CALLBACK_PREFIX:
+        key = payload
+    elif prefix == "help":
+        payload = _strip_owner_suffix(payload)
+        key = _LEGACY_HELP_KEYS.get(payload, payload)
     else:
-        body = _HELP_SECTION_TEXT.get(section)
-    if body is None:
-        return _main_help_text(settings)
-    return f"<b>{settings.bot_name}</b>\n\n{body}"
+        return ROOT_KEY
+    try:
+        get_nav_node(key)
+    except KeyError:
+        return ROOT_KEY
+    return key
 
 
-def _resolve_help_payload(settings: Settings, section: str | None, owner_user_id: int | None = None) -> tuple[str, InlineKeyboardMarkup]:
-    if section in (None, "", "home"):
-        return _main_help_text(settings), _build_help_keyboard(section=None, owner_user_id=owner_user_id)
-    return _section_help_text(settings, section), _build_help_keyboard(section=section, owner_user_id=owner_user_id)
+def _node_body(settings: Settings, key: str) -> str | None:
+    """Hand-written text of a node; nodes without one show only their area summary and command entries."""
+    if key == "troubleshooting":
+        return (
+            "<b>Если команда не отвечает</b>\n"
+            "• Проверьте, где вы пишете: некоторые команды работают только в группе или только в ЛС.\n"
+            "• Для скрытых ролей и карточек сначала откройте ЛС с ботом через /start.\n"
+            "• Если текстовая команда не срабатывает, попробуйте slash-вариант: админ мог выключить "
+            "<code>text_commands_enabled</code> или включить режим алиасов.\n"
+            "• Для действий над человеком часто нужен ответ на его сообщение (reply).\n"
+            "• Управление игрой, настройками и AI-запросы могут требовать отдельного права Selara.\n"
+            "• Для AI проверьте включённую функцию, подписку, дневной/месячный лимит и кулдаун.\n"
+            "• Если проблема остаётся: в личке <code>/feedback проблема: описание</code>. "
+            "Не присылайте пароли и токены."
+        )
+    if key == "ai_summary":
+        limit = _policy_limit(AiFeature.DAILY_SUMMARY, "manual")
+        hour, minimum = _summary_defaults()
+        return (
+            "<b>Как получить итоги</b>\n"
+            f"• <code>/summary</code> в группе — ручная сводка, {limit} раз в месяц на чат.\n"
+            "• Нужны право настройки чата и сохранение сообщений "
+            "(<code>save_message true</code>).\n"
+            f"• Минимум сообщений по умолчанию: {minimum}; порог задаёт "
+            "<code>daily_summary_min_messages</code>.\n"
+            "• Автоматические итоги работают только с активным Selara AI для чата; "
+            "<code>daily_summary_enabled</code> включает их, "
+            f"<code>daily_summary_hour</code> по умолчанию {hour} (время бота).\n"
+            "• Настройки доступны администратору через ЛС-панель /start или /settings."
+        )
+    if key == "ai_group":
+        return _ai_help_text(settings)
+    if key == "ai_models":
+        return _models_help_text(settings)
+    if key == "subscriptions":
+        return _ai_plus_help_text(settings)
+    if key.startswith("game_"):
+        # GAME_RULES_RU opens with its own bold title; the screen header already shows it.
+        return GAME_RULES_RU[key[len("game_") :]].split("\n", 1)[1]
+    return _HELP_SECTION_TEXT.get(key)
+
+
+def _node_text(settings: Settings, node: NavNode) -> str:
+    cards = {card.spec_key: card for card in FEATURE_CARDS}
+    blocks = [f"<b>{escape(node.title)}</b>\n{escape(node.summary)}"]
+    body = _node_body(settings, node.key)
+    if body:
+        blocks.append(body)
+    features = feature_block(node.spec_keys, cards)
+    if features:
+        blocks.append(features)
+    return "\n\n".join(blocks)
+
+
+def _nav_button(text: str, key: str) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text=text, callback_data=nav_callback(key))
+
+
+def _node_keyboard(node: NavNode) -> InlineKeyboardMarkup:
+    children = [get_nav_node(key) for key in node.children]
+    rows: list[list[InlineKeyboardButton]] = [
+        [_nav_button(child.title, child.key) for child in children[index : index + 2]]
+        for index in range(0, len(children), 2)
+    ]
+    footer: list[InlineKeyboardButton] = []
+    if node.parent is not None:
+        footer.append(_nav_button(BACK_LABEL, node.parent))
+    if node.parent not in (None, ROOT_KEY):
+        footer.append(_nav_button(SECTIONS_LABEL, ROOT_KEY))
+    if footer:
+        rows.append(footer)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _requested_help_page(data: str | None) -> tuple[str, int]:
+    """Parse public per-page callbacks, preserving old help: and nv: links."""
+    if data and data.startswith("nvp:"):
+        payload = data[len("nvp:"):]
+        key, separator, raw_page = payload.rpartition(":")
+        if separator and raw_page.isdigit():
+            try:
+                get_nav_node(key)
+            except KeyError:
+                pass
+            else:
+                return key, int(raw_page)
+        return ROOT_KEY, 0
+    return _resolve_node_key(data), 0
+
+
+def _page_keyboard(key: str, page_index: int, page_count: int) -> InlineKeyboardMarkup:
+    """Keep navigation in a single editable message, including long screens."""
+    keyboard = _node_keyboard(get_nav_node(key))
+    if page_count <= 1:
+        return keyboard
+    row: list[InlineKeyboardButton] = []
+    if page_index:
+        row.append(InlineKeyboardButton(
+            text="◀️ Предыдущая",
+            callback_data=f"nvp:{key}:{page_index - 1}",
+        ))
+    if page_index < page_count - 1:
+        row.append(InlineKeyboardButton(
+            text="Следующая ▶️",
+            callback_data=f"nvp:{key}:{page_index + 1}",
+        ))
+    return InlineKeyboardMarkup(inline_keyboard=[row, *keyboard.inline_keyboard])
+
+
+def _render_screen(settings: Settings, key: str) -> tuple[list[str], InlineKeyboardMarkup]:
+    """Pages for a node and its keyboard. Long screens are split; only the last page carries the keyboard."""
+    node = get_nav_node(key)
+    return split_html_message(_node_text(settings, node), max_len=_PAGE_MAX_LEN), _node_keyboard(node)
 
 
 async def send_help(message: Message, settings: Settings) -> None:
-    owner_user_id = message.from_user.id if message.from_user else None
-    text, keyboard = _resolve_help_payload(settings, section=None, owner_user_id=owner_user_id)
-    await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+    pages, _ = _render_screen(settings, ROOT_KEY)
+    await message.answer(
+        pages[0], parse_mode="HTML",
+        reply_markup=_page_keyboard(ROOT_KEY, 0, len(pages)),
+    )
 
 
 @router.message(Command("help"))
@@ -395,7 +452,11 @@ async def help_command(message: Message, settings: Settings) -> None:
     await send_help(message, settings)
 
 
-@router.callback_query(F.data.startswith("help:"))
+@router.callback_query(
+    F.data.startswith("help:")
+    | F.data.startswith(f"{NAV_CALLBACK_PREFIX}:")
+    | F.data.startswith("nvp:")
+)
 async def help_callback(query: CallbackQuery, settings: Settings) -> None:
     if query.data is None or query.message is None:
         try:
@@ -404,23 +465,36 @@ async def help_callback(query: CallbackQuery, settings: Settings) -> None:
             pass
         return
 
-    section, owner_user_id = _parse_help_callback_data(query.data)
-    if owner_user_id is not None and query.from_user is not None and query.from_user.id != owner_user_id:
+    # Telegram may return an inaccessible message for an older callback.
+    # Such a message has no edit_text method: avoid an AttributeError and
+    # direct the user to a fresh help screen instead.
+    if not callable(getattr(query.message, "edit_text", None)):
         try:
-            await query.answer("Это меню помощи другого пользователя. Откройте своё: /help", show_alert=True)
+            await query.answer("Сообщение справки устарело. Откройте /help заново.", show_alert=True)
         except TelegramBadRequest:
             pass
         return
 
-    effective_owner_user_id = owner_user_id
-    if effective_owner_user_id is None and query.from_user is not None:
-        effective_owner_user_id = query.from_user.id
-
-    text, keyboard = _resolve_help_payload(settings, section=section, owner_user_id=effective_owner_user_id)
+    key, requested_page = _requested_help_page(query.data)
+    pages, _ = _render_screen(settings, key)
+    page_index = min(requested_page, len(pages) - 1)
     try:
-        await query.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        await query.message.edit_text(
+            pages[page_index], parse_mode="HTML",
+            reply_markup=_page_keyboard(key, page_index, len(pages)),
+        )
     except TelegramBadRequest as exc:
-        if "message is not modified" not in str(exc).lower():
+        error = str(exc).lower()
+        if "message is not modified" not in error:
+            # Old public help buttons may outlive their editable Telegram
+            # message. Explain the recovery action instead of raising a
+            # global callback error; do not swallow unrelated Telegram faults.
+            if "message to edit not found" in error or "message can't be edited" in error:
+                try:
+                    await query.answer("Сообщение справки устарело. Откройте /help заново.", show_alert=True)
+                except TelegramBadRequest:
+                    pass
+                return
             raise
     try:
         await query.answer()

@@ -175,3 +175,18 @@ async def test_lock_allows_clan_views(text: str) -> None:
     assert result == "handled"
     message.answer.assert_not_awaited()
 
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", ["/", "/   ", "  / ", "/\\t"])
+async def test_locked_chat_passes_empty_slash_to_handler(raw: str) -> None:
+    middleware = ChatWriteLockMiddleware()
+    handler = AsyncMock(return_value="handled")
+    message = _message(raw)
+
+    data = {"chat_settings": _locked_settings()}
+    result = await middleware(handler, message, data)
+
+    assert result == "handled"
+    handler.assert_awaited_once_with(message, data)
+    message.answer.assert_not_awaited()

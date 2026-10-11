@@ -60,6 +60,9 @@ class SttClient:
             api_key=config.api_key,
             base_url=config.base_url,
             timeout=config.timeout_seconds,
+            # Retry policy belongs to transcribe_with_retry: SDK retries would
+            # silently repeat billable uploads and retry permanent API errors.
+            max_retries=0,
         )
 
     @property

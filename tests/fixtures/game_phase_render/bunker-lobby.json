@@ -1,0 +1,66 @@
+{
+  "text_lines": [
+    "<b>Бункер</b>",
+    "<i>Катастрофа, скрытые характеристики и голосования за выбывание до лимита мест.</i>",
+    "<b>Этап:</b> Набор игроков",
+    "<b>Игроков:</b> 6",
+    "<b>Создатель лобби:</b> <a href=\"tg://user?id=1\">Аня &lt;&amp;&gt; 🦊</a>",
+    "",
+    "<b>Лобби (6):</b>",
+    "1. <a href=\"tg://user?id=1\">Аня &lt;&amp;&gt; 🦊</a>",
+    "2. <a href=\"tg://user?id=2\">Игрок 2</a>",
+    "3. <a href=\"tg://user?id=3\">Игрок 3</a>",
+    "4. <a href=\"tg://user?id=4\">Игрок 4</a>",
+    "5. <a href=\"tg://user?id=5\">Игрок 5</a>",
+    "6. <a href=\"tg://user?id=6\">Игрок 6</a>",
+    "<b>Мест в бункере:</b> 3",
+    "<b>Минимум для старта:</b> 6 игроков"
+  ],
+  "public_keyboard": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "➕ Присоединиться",
+          "callback_data": "game:join:fixture"
+        },
+        {
+          "text": "➖ Покинуть",
+          "callback_data": "game:leave:fixture"
+        }
+      ],
+      [
+        {
+          "text": "❓ Как играть",
+          "callback_data": "game:lrules:fixture"
+        }
+      ],
+      [
+        {
+          "text": "➖ Места",
+          "callback_data": "gcfg:fixture:bunker_seats_dec"
+        },
+        {
+          "text": "🏚 Мест: 3",
+          "callback_data": "gcfg:fixture:bunker_seats_noop"
+        },
+        {
+          "text": "➕ Места",
+          "callback_data": "gcfg:fixture:bunker_seats_inc"
+        }
+      ],
+      [
+        {
+          "text": "🎬 Старт",
+          "callback_data": "game:start:fixture"
+        },
+        {
+          "text": "🛑 Отменить",
+          "callback_data": "game:cancel:fixture"
+        }
+      ]
+    ]
+  },
+  "manager_keyboard": null,
+  "execution_prompt_lines": null,
+  "execution_keyboard": null
+}

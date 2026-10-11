@@ -140,14 +140,17 @@ async def test_mid_game_reveal_advance_dm_failure_triggers_group_warning(monkeyp
         def __init__(self, *, user_id: int, data: str) -> None:
             self.data = data
             self.from_user = SimpleNamespace(id=user_id, username="u", first_name="U", last_name=None, is_bot=False)
-            self.message = SimpleNamespace(chat=SimpleNamespace(id=-100, type="group", title="chat"), message_id=1)
+            self.message = SimpleNamespace(
+                chat=SimpleNamespace(id=user_id, type="private", title=None),
+                message_id=1, edit_text=AsyncMock(),
+            )
             self.answers: list = []
 
         async def answer(self, text=None, show_alert=False):
             self.answers.append((text, show_alert))
 
     bot = FakeBot(exempt_user_id=first_actor)
-    query = FakeQuery(user_id=first_actor, data=f"gbkr:{started.game_id}:{field_key}")
+    query = FakeQuery(user_id=first_actor, data=f"gbkr:{started.game_id}:{started.round_no}:{started.bunker_reveal_cursor}:{field_key}")
     await game_router.bunker_reveal_callback(query, bot=bot, chat_settings=_chat_settings())
 
     refreshed = await store.get_game(started.game_id)

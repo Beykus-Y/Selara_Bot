@@ -1413,10 +1413,57 @@ class GameStore:
             game.economy_rewards_granted = True
             return game
 
-    async def set_quiz_feed_message_id(self, *, game_id: str, message_id: int | None) -> GroupGame | None:
+    async def take_quiz_feed_message_id(
+        self,
+        *,
+        game_id: str,
+        expected_question_index: int | None = None,
+        finished_only: bool = False,
+    ) -> tuple[bool, int | None]:
+        """Atomically detach the feed for one active question or a finished quiz.
+
+        The returned flag distinguishes a valid question with no old message
+        from a stale publisher, which must not send anything.
+        """
+        async with self._lock_game(game_id):
+            game = self._by_id.get(game_id)
+            if game is None or game.kind != "quiz":
+                return False, None
+            if finished_only:
+                if game.status != "finished":
+                    return False, None
+            elif (
+                game.status != "started"
+                or game.phase != "freeplay"
+                or game.quiz_current_question_index != expected_question_index
+            ):
+                return False, None
+            message_id = game.quiz_feed_message_id
+            game.quiz_feed_message_id = None
+            return True, message_id
+
+    async def set_quiz_feed_message_id(
+        self,
+        *,
+        game_id: str,
+        message_id: int | None,
+        expected_question_index: int | None = None,
+    ) -> GroupGame | None:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
+                return None
+            # Late Telegram sends must not replace a newer question's feed.
+            # A caller providing an expected index is fenced under this lock,
+            # not against an unlocked snapshot.
+            if expected_question_index is not None and (
+                game.kind != "quiz"
+                or game.status != "started"
+                or game.phase != "freeplay"
+                or game.quiz_current_question_index != expected_question_index
+            ):
+                return None
+            if message_id is not None and (game.kind != "quiz" or game.status != "started"):
                 return None
             game.quiz_feed_message_id = message_id
             return game
@@ -2082,12 +2129,38 @@ class GameStore:
 
             return game, "Неизвестный тип игры"
 
-    async def finish(self, *, game_id: str, winner_text: str | None = None) -> GroupGame | None:
+    async def finish(
+        self,
+        *,
+        game_id: str,
+        winner_text: str | None = None,
+        expected_status: str | None = None,
+        expected_phase: str | None = None,
+        expected_round_no: int | None = None,
+        quiz_feed_cleanup_ids: list[int] | None = None,
+    ) -> GroupGame | None:
+        """Finish atomically, optionally rejecting stale lifecycle confirmations.
+
+        Existing internal game completions retain their previous behavior.
+        Confirmation callbacks must supply status, phase and round so a
+        delayed click cannot end a newer stage or finish twice.
+        """
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None
+            if expected_status is not None and game.status != expected_status:
+                return None
+            if expected_phase is not None and game.phase != expected_phase:
+                return None
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return None
 
+            # Snapshot the live quiz-feed ID *inside* this same game lock:
+            # the external Telegram delete is issued only after a committed
+            # finish. A concurrent publisher cannot insert between read/finish.
+            if quiz_feed_cleanup_ids is not None and game.quiz_feed_message_id is not None:
+                quiz_feed_cleanup_ids.append(game.quiz_feed_message_id)
             game.status = "finished"
             game.phase = "finished"
             game.winner_text = winner_text
@@ -2184,11 +2257,17 @@ class GameStore:
         game_id: str,
         actor_user_id: int,
         option_index: int,
+        expected_round_no: int | None = None,
+        expected_chat_id: int | None = None,
     ) -> tuple[GroupGame | None, str | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
+            if expected_chat_id is not None and game.chat_id != expected_chat_id:
+                return game, None, "Эта кнопка из другого чата"
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, None, "Тема из предыдущего раунда. Откройте актуальную доску."
             if game.kind != "bredovukha":
                 return game, None, "Это не «Бредовуха»"
             if game.status != "started" or game.phase != "category_pick":
@@ -2215,11 +2294,15 @@ class GameStore:
             game.phase_started_at = datetime.now(timezone.utc)
             return game, category, None
 
-    async def bred_force_pick_category(self, *, game_id: str) -> tuple[GroupGame | None, str | None, str | None]:
+    async def bred_force_pick_category(
+        self, *, game_id: str, expected_round_no: int | None = None,
+    ) -> tuple[GroupGame | None, str | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, None, "Действие ведущего устарело. Обновите игровую доску."
             if game.kind != "bredovukha":
                 return game, None, "Это не «Бредовуха»"
             if game.status != "started" or game.phase != "category_pick":
@@ -2251,11 +2334,14 @@ class GameStore:
         game_id: str,
         voter_user_id: int,
         target_user_id: int,
+        expected_chat_id: int | None = None,
     ) -> tuple[GroupGame | None, SpyVoteResolution | None, int | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, None, "Игра не найдена"
+            if expected_chat_id is not None and game.chat_id != expected_chat_id:
+                return game, None, None, "Эта кнопка из другого чата"
             if game.kind != "spy":
                 return game, None, None, "Это не игра «Шпион»"
             if game.status != "started" or game.phase != "freeplay":
@@ -2448,11 +2534,23 @@ class GameStore:
         game_id: str,
         responder_user_id: int,
         answer_code: Literal["yes", "no", "unknown", "irrelevant"],
+        expected_question_version: int | None = None,
+        expected_chat_id: int | None = None,
     ) -> tuple[GroupGame | None, WhoamiAnswerResolution | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
+            if expected_chat_id is not None and game.chat_id != expected_chat_id:
+                return game, None, "Эта кнопка из другого чата"
+            if (
+                expected_question_version is not None
+                and (
+                    int(game.phase_started_at.timestamp() * 1_000_000)
+                    if game.phase_started_at is not None else 0
+                ) != expected_question_version
+            ):
+                return game, None, "Это старый вопрос. Откройте актуальную доску."
             if game.kind != "whoami":
                 return game, None, "Это не игра «Кто я»"
             if game.status != "started" or game.phase != "whoami_answer":
@@ -2635,11 +2733,14 @@ class GameStore:
         *,
         game_id: str,
         user_id: int,
+        expected_chat_id: int | None = None,
     ) -> tuple[GroupGame | None, DiceRollResult | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
+            if expected_chat_id is not None and game.chat_id != expected_chat_id:
+                return game, None, "Эта кнопка из другого чата"
             if game.kind != "dice":
                 return game, None, "Это не игра «Дуэль кубиков»"
             if game.status != "started" or game.phase != "freeplay":
@@ -2684,11 +2785,15 @@ class GameStore:
         game_id: str,
         user_id: int,
         option_index: int,
+        expected_chat_id: int | None = None,
+        expected_question_index: int | None = None,
     ) -> tuple[GroupGame | None, QuizAnswerResult | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
+            if expected_chat_id is not None and game.chat_id != expected_chat_id:
+                return game, None, "Эта кнопка из другого чата"
             if game.kind != "quiz":
                 return game, None, "Это не викторина"
             if game.status != "started" or game.phase != "freeplay":
@@ -2696,6 +2801,11 @@ class GameStore:
             if user_id not in game.players:
                 return game, None, "Вы не участник этой викторины"
 
+            if (
+                expected_question_index is not None
+                and game.quiz_current_question_index != expected_question_index
+            ):
+                return game, None, "Этот вопрос уже закрыт. Используйте актуальную доску."
             question = self._current_quiz_question(game)
             if question is None:
                 return game, None, "Вопрос недоступен"
@@ -2731,6 +2841,7 @@ class GameStore:
         *,
         game_id: str,
         force: bool,
+        expected_question_index: int | None = None,
     ) -> tuple[GroupGame | None, QuizRoundResolution | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
@@ -2742,6 +2853,8 @@ class GameStore:
                 return game, None, "Сейчас викторина не в активной фазе"
 
             question_index = game.quiz_current_question_index
+            if expected_question_index is not None and question_index != expected_question_index:
+                return game, None, "Этот вопрос уже закрыт. Используйте актуальную доску."
             question = self._current_quiz_question(game)
             if question_index is None or question is None:
                 return game, None, "Текущий вопрос не найден"
@@ -2877,11 +2990,14 @@ class GameStore:
         *,
         game_id: str,
         force: bool,
+        expected_round_no: int | None = None,
     ) -> tuple[GroupGame | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, "Действие ведущего устарело. Обновите игровую доску."
             if game.kind != "bredovukha":
                 return game, "Это не «Бредовуха»"
             if game.status != "started" or game.phase != "private_answers":
@@ -2903,11 +3019,17 @@ class GameStore:
         game_id: str,
         voter_user_id: int,
         option_index: int,
+        expected_round_no: int | None = None,
+        expected_chat_id: int | None = None,
     ) -> tuple[GroupGame | None, BredVoteResult | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
+            if expected_chat_id is not None and game.chat_id != expected_chat_id:
+                return game, None, "Эта кнопка из другого чата"
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, None, "Кнопка предыдущего раунда. Откройте актуальную доску."
             if game.kind != "bredovukha":
                 return game, None, "Это не «Бредовуха»"
             if game.status != "started" or game.phase != "public_vote":
@@ -2957,11 +3079,14 @@ class GameStore:
         *,
         game_id: str,
         force: bool,
+        expected_round_no: int | None = None,
     ) -> tuple[GroupGame | None, BredRoundResolution | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, None, "Действие ведущего устарело. Обновите игровую доску."
             if game.kind != "bredovukha":
                 return game, None, "Это не «Бредовуха»"
             if game.status != "started" or game.phase != "public_vote":
@@ -3126,11 +3251,17 @@ class GameStore:
         game_id: str,
         user_id: int,
         card_indexes: tuple[int, ...],
+        expected_round_no: int | None = None,
+        expected_chat_id: int | None = None,
     ) -> tuple[GroupGame | None, ZlobSubmitResult | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
+            if expected_chat_id is not None and game.chat_id != expected_chat_id:
+                return game, None, "Эта кнопка из другого чата"
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, None, "Кнопка предыдущего раунда. Откройте актуальную доску."
             if game.kind != "zlobcards":
                 return game, None, "Это не «500 Злобных Карт»"
             if game.status != "started" or game.phase != "private_answers":
@@ -3194,11 +3325,19 @@ class GameStore:
         *,
         game_id: str,
         force: bool,
+        expected_round_no: int | None = None,
+        expected_phase_started_at: datetime | None = None,
     ) -> tuple[GroupGame | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
+            # Validate timer identity under the same lock as the transition.
+            # A preflight get_game() cannot fence a round changed while waiting.
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, "Таймер предыдущего раунда"
+            if expected_phase_started_at is not None and game.phase_started_at != expected_phase_started_at:
+                return game, "Таймер предыдущей фазы"
             if game.kind != "zlobcards":
                 return game, "Это не «500 Злобных Карт»"
             if game.status != "started" or game.phase != "private_answers":
@@ -3220,11 +3359,17 @@ class GameStore:
         game_id: str,
         voter_user_id: int,
         option_index: int,
+        expected_round_no: int | None = None,
+        expected_chat_id: int | None = None,
     ) -> tuple[GroupGame | None, ZlobVoteResult | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
+            if expected_chat_id is not None and game.chat_id != expected_chat_id:
+                return game, None, "Эта кнопка из другого чата"
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, None, "Кнопка предыдущего раунда. Откройте актуальную доску."
             if game.kind != "zlobcards":
                 return game, None, "Это не «500 Злобных Карт»"
             if game.status != "started" or game.phase != "public_vote":
@@ -3281,11 +3426,14 @@ class GameStore:
         *,
         game_id: str,
         force: bool,
+        expected_round_no: int | None = None,
     ) -> tuple[GroupGame | None, ZlobRoundResolution | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, None, "Действие ведущего устарело. Обновите игровую доску."
             if game.kind != "zlobcards":
                 return game, None, "Это не «500 Злобных Карт»"
             if game.status != "started" or game.phase != "public_vote":
@@ -3440,11 +3588,20 @@ class GameStore:
         game_id: str,
         actor_user_id: int,
         field_key: str,
+        expected_round_no: int | None = None,
+        expected_reveal_cursor: int | None = None,
+        expected_chat_id: int | None = None,
     ) -> tuple[GroupGame | None, BunkerRevealResult | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
+            if expected_chat_id is not None and game.chat_id != expected_chat_id:
+                return game, None, "Эта кнопка из другого чата"
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, None, "Кнопка предыдущего раунда. Обновите игровую доску."
+            if expected_reveal_cursor is not None and game.bunker_reveal_cursor != expected_reveal_cursor:
+                return game, None, "Этот ход уже завершён. Откройте актуальную карточку."
             if game.kind != "bunker":
                 return game, None, "Это не «Бункер»"
             if game.status != "started" or game.phase != "bunker_reveal":
@@ -3488,6 +3645,8 @@ class GameStore:
         self,
         *,
         game_id: str,
+        expected_round_no: int | None = None,
+        expected_reveal_cursor: int | None = None,
     ) -> tuple[GroupGame | None, BunkerRevealResult | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
@@ -3497,6 +3656,10 @@ class GameStore:
                 return game, None, "Это не «Бункер»"
             if game.status != "started" or game.phase != "bunker_reveal":
                 return game, None, "Сейчас не этап раскрытия"
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, None, "Раунд уже изменился. Откройте актуальную карточку."
+            if expected_reveal_cursor is not None and game.bunker_reveal_cursor != expected_reveal_cursor:
+                return game, None, "Этот ход уже завершён. Откройте актуальную карточку."
 
             actor_user_id = game.bunker_current_actor_user_id
             if actor_user_id is None:
@@ -3539,11 +3702,17 @@ class GameStore:
         game_id: str,
         voter_user_id: int,
         target_user_id: int,
+        expected_round_no: int | None = None,
+        expected_chat_id: int | None = None,
     ) -> tuple[GroupGame | None, int | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
+            if expected_chat_id is not None and game.chat_id != expected_chat_id:
+                return game, None, "Эта кнопка из другого чата"
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, None, "Кнопка предыдущего раунда. Обновите игровую доску."
             if game.kind != "bunker":
                 return game, None, "Это не «Бункер»"
             if game.status != "started" or game.phase != "bunker_vote":
@@ -3595,11 +3764,14 @@ class GameStore:
         *,
         game_id: str,
         force: bool,
+        expected_round_no: int | None = None,
     ) -> tuple[GroupGame | None, BunkerVoteResolution | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, None, "Действие ведущего устарело. Обновите игровую доску."
             if game.kind != "bunker":
                 return game, None, "Это не «Бункер»"
             if game.status != "started" or game.phase != "bunker_vote":
@@ -3696,11 +3868,14 @@ class GameStore:
         game_id: str,
         actor_user_id: int,
         target_user_id: int,
+        expected_round_no: int | None = None,
     ) -> tuple[GroupGame | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, "Кнопка предыдущего раунда. Обновите игровую доску."
             if game.kind != "mafia":
                 return game, "Это не мафия"
             if game.status != "started" or game.phase != "night":
@@ -3924,7 +4099,7 @@ class GameStore:
 
             return game, bool(required_checks and all(required_checks)), None
 
-    async def mafia_open_day_vote(self, *, game_id: str) -> tuple[GroupGame | None, str | None]:
+    async def mafia_open_day_vote(self, *, game_id: str, expected_round_no: int | None = None, expected_phase_started_at: datetime | None = None) -> tuple[GroupGame | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
@@ -3934,6 +4109,10 @@ class GameStore:
             if game.status != "started" or game.phase != "day_discussion":
                 return game, "Сейчас не обсуждение дня"
 
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, "Таймер предыдущего раунда не применён"
+            if expected_phase_started_at is not None and game.phase_started_at != expected_phase_started_at:
+                return game, "Таймер предыдущей фазы не применён"
             game.phase = "day_vote"
             game.phase_started_at = datetime.now(timezone.utc)
             game.day_votes.clear()
@@ -3946,11 +4125,14 @@ class GameStore:
         game_id: str,
         voter_user_id: int,
         target_user_id: int,
+        expected_round_no: int | None = None,
     ) -> tuple[GroupGame | None, int | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, None, "Кнопка предыдущего раунда. Обновите игровую доску."
             if game.kind != "mafia":
                 return game, None, "Это не мафия"
             if game.status != "started" or game.phase != "day_vote":
@@ -3968,7 +4150,7 @@ class GameStore:
             game.day_votes[voter_user_id] = target_user_id
             return game, previous_target_user_id, None
 
-    async def mafia_resolve_night(self, *, game_id: str) -> tuple[GroupGame | None, NightResolution | None, str | None]:
+    async def mafia_resolve_night(self, *, game_id: str, expected_round_no: int | None = None, expected_phase_started_at: datetime | None = None) -> tuple[GroupGame | None, NightResolution | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
@@ -3977,6 +4159,10 @@ class GameStore:
                 return game, None, "Это не мафия"
             if game.status != "started" or game.phase != "night":
                 return game, None, "Сейчас не фаза ночи"
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, None, "Таймер предыдущего раунда не применён"
+            if expected_phase_started_at is not None and game.phase_started_at != expected_phase_started_at:
+                return game, None, "Таймер предыдущей фазы не применён"
             alive = set(game.alive_player_ids)
             blocked_actors = {
                 target_user_id
@@ -4526,7 +4712,7 @@ class GameStore:
             )
             return game, resolution, None
 
-    async def mafia_resolve_day_vote(self, *, game_id: str) -> tuple[GroupGame | None, DayVoteResolution | None, str | None]:
+    async def mafia_resolve_day_vote(self, *, game_id: str, expected_round_no: int | None = None, expected_phase_started_at: datetime | None = None) -> tuple[GroupGame | None, DayVoteResolution | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
@@ -4536,6 +4722,10 @@ class GameStore:
             if game.status != "started" or game.phase != "day_vote":
                 return game, None, "Сейчас не фаза голосования"
 
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, None, "Таймер предыдущего раунда не применён"
+            if expected_phase_started_at is not None and game.phase_started_at != expected_phase_started_at:
+                return game, None, "Таймер предыдущей фазы не применён"
             alive_sorted = sorted(game.alive_player_ids)
             vote_protocol = tuple((voter, game.day_votes.get(voter)) for voter in alive_sorted)
             public_notes: list[str] = []
@@ -4611,11 +4801,14 @@ class GameStore:
         game_id: str,
         voter_user_id: int,
         approve: bool,
+        expected_round_no: int | None = None,
     ) -> tuple[GroupGame | None, bool | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, None, "Кнопка предыдущего раунда. Обновите игровую доску."
             if game.kind != "mafia":
                 return game, None, "Это не мафия"
             if game.status != "started" or game.phase != "day_execution_confirm":
@@ -4645,6 +4838,8 @@ class GameStore:
         self,
         *,
         game_id: str,
+        expected_round_no: int | None = None,
+        expected_phase_started_at: datetime | None = None,
     ) -> tuple[GroupGame | None, ExecutionConfirmResolution | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
@@ -4655,6 +4850,10 @@ class GameStore:
             if game.status != "started" or game.phase != "day_execution_confirm":
                 return game, None, "Сейчас не фаза подтверждения"
 
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, None, "Таймер предыдущего раунда не применён"
+            if expected_phase_started_at is not None and game.phase_started_at != expected_phase_started_at:
+                return game, None, "Таймер предыдущей фазы не применён"
             candidate_user_id = game.mafia_execution_candidate_user_id
             alive_sorted = sorted(game.alive_player_ids)
 
@@ -5944,6 +6143,31 @@ def _event_type_for_method(name: str) -> str:
     return "game_updated"
 
 
+_PHASE_SNAPSHOT_METHODS = frozenset({
+    "start",
+    "mafia_resolve_night",
+    "mafia_open_day_vote",
+    "mafia_resolve_day_vote",
+    "mafia_resolve_execution_confirm",
+    "zlob_open_vote",
+    "zlob_resolve_round",
+    "zlob_submit_cards",
+})
+
+
+class _PhaseVersionedResult(tuple):
+    """Preserve normal tuple unpacking, plus a frozen version from before Redis I/O."""
+
+    def __new__(
+        cls,
+        result: tuple,
+        phase_version: tuple[str, str, int, datetime | None],
+    ) -> _PhaseVersionedResult:
+        instance = super().__new__(cls, result)
+        instance.phase_version = phase_version
+        return instance
+
+
 class _RecoverySupersededError(Exception):
     """A recovery attempt lost ownership of its candidate Redis runtime."""
 
@@ -6882,6 +7106,20 @@ class RuntimeGameStore:
             token = _TOUCHED_GAME_IDS.set(touched)
             try:
                 result = await attr(*args, **kwargs)
+                # Capture a phase version BEFORE Redis persistence yields. The
+                # returned GroupGame itself is a shared mutable object; after
+                # sync another callback may already have advanced its phase.
+                if (
+                    name in _PHASE_SNAPSHOT_METHODS
+                    and isinstance(result, tuple)
+                    and result
+                    and isinstance(result[0], GroupGame)
+                ):
+                    game = result[0]
+                    result = _PhaseVersionedResult(
+                        result,
+                        (game.kind, game.phase, game.round_no, game.phase_started_at),
+                    )
             finally:
                 _TOUCHED_GAME_IDS.reset(token)
             if name not in _READ_ONLY_GAMESTORE_METHODS:

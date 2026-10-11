@@ -346,6 +346,7 @@ async def test_summary_sends_bound_artifact_with_ready_html(context, monkeypatch
         pages=[png()], source={'pages': ['<p>2 эпизода</p>'], 'summary_run_id': 42})
     await context.repository.session.commit()
     repo = SimpleNamespace(get_daily_summary_run_by_id=AsyncMock(return_value=SimpleNamespace(chat_id=1,
+        trigger="scheduled", summary_date=claimed_at.date(), window_to=claimed_at,
         claimed_at=claimed_at, lease_until=datetime.now(timezone.utc) + timedelta(minutes=30),
         generated_text='<b>Итоги</b>', topics_json={'artifact_id': row.id})),
         claim_daily_summary_delivery=AsyncMock(return_value=claimed_at),
@@ -365,6 +366,7 @@ async def test_summary_missing_artifact_preserves_text(context, monkeypatch):
     from selara.presentation.daily_summary import _send_and_mark
     claimed_at = datetime.now(timezone.utc)
     repo = SimpleNamespace(get_daily_summary_run_by_id=AsyncMock(return_value=SimpleNamespace(chat_id=1,
+        trigger="scheduled", summary_date=claimed_at.date(), window_to=claimed_at,
         claimed_at=claimed_at, lease_until=claimed_at + timedelta(minutes=30),
         generated_text='<b>Итоги</b>', topics_json={'artifact_id': 'missing'})),
         claim_daily_summary_delivery=AsyncMock(return_value=claimed_at),
@@ -434,3 +436,117 @@ async def test_render_real_svg_with_standard_text_attributes():
         '<rect x="0" y="0" width="400" height="60" fill="#5577cc"/>'
         '<text x="10" y="100" font-size="24" font-family="sans-serif" font-weight="bold">42 сообщения</text></svg>'], '')
     assert result['dimensions'][0]['width'] == 1600
+
+
+async def test_last_confirmed_artifact_is_owner_topic_scoped(context):
+    older = await artifact(context)
+    older.delivery = {"complete": True, "message_ids": [10]}
+    await context.repository.session.commit()
+    draft = await artifact(context)
+    draft.delivery = {}
+    await context.repository.session.commit()
+    found = await context.repository.latest_delivered(chat_id=1, thread_id=7, creator_id=10)
+    assert found.id == older.id
+    for chat_id, thread_id, creator_id in [(2, 7, 10), (1, 8, 10), (1, 7, 11)]:
+        assert await context.repository.latest_delivered(
+            chat_id=chat_id, thread_id=thread_id, creator_id=creator_id,
+        ) is None
+    older.delivery = {"complete": True, "message_ids": [10], "text_only": True}
+    await context.repository.session.commit()
+    assert await context.repository.latest_delivered(chat_id=1, thread_id=7, creator_id=10) is None
+
+
+async def test_summary_artifact_deadline_after_pending_commit_clears_pending(context, monkeypatch):
+    from selara.presentation import daily_summary as module
+    due = datetime(2026, 10, 10, 3, tzinfo=timezone.utc)
+    clock = [due + timedelta(hours=6)]
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0]
+
+    monkeypatch.setattr(module, 'datetime', Clock)
+    context.thread_id = None
+    row = await context.repository.create(chat_id=1, thread_id=None, creator_id=0, title='Summary',
+        pages=[png()], source={'pages': ['<p>2 эпизода</p>'], 'summary_run_id': 42})
+    await context.repository.session.commit()
+    fence_calls = 0
+
+    async def fence(**kwargs):
+        nonlocal fence_calls
+        fence_calls += 1
+        if fence_calls == 2:  # after artifact pending-state commit
+            clock[0] += timedelta(seconds=1)
+        return True
+
+    repo = SimpleNamespace(get_daily_summary_run_by_id=AsyncMock(return_value=SimpleNamespace(chat_id=1,
+        trigger='scheduled', summary_date=due.date(), window_from=due-timedelta(days=1), window_to=due,
+        claimed_at=due, generated_text='<b>Итоги</b>', topics_json={'artifact_id': row.id})),
+        claim_daily_summary_delivery=AsyncMock(return_value=due),
+        is_daily_summary_delivery_claim_current=AsyncMock(side_effect=fence),
+        mark_daily_summary_run_sent=AsyncMock(), mark_daily_summary_run_send_failed=AsyncMock())
+    monkeypatch.setattr(module, 'SqlAlchemyActivityRepository', lambda session: repo)
+    bot = SimpleNamespace(send_message=AsyncMock(), send_photo=AsyncMock())
+    assert await module._send_and_mark(bot=bot, session_factory=lambda: context.repository.session,
+        chat_id=1, run_id=42, claimed_at=due) is False
+    bot.send_photo.assert_not_awaited()
+    bot.send_message.assert_not_awaited()
+    repo.mark_daily_summary_run_sent.assert_not_awaited()
+    repo.mark_daily_summary_run_send_failed.assert_not_awaited()
+    assert 'pending' not in row.delivery
+    assert not row.delivery.get('complete')
+
+
+async def test_summary_final_photo_can_complete_across_delivery_deadline(context, monkeypatch):
+    """A confirmed final Telegram send remains sent even if its response arrives after the cutoff."""
+    from selara.presentation import daily_summary as module
+
+    due = datetime(2026, 10, 10, 3, tzinfo=timezone.utc)
+    clock = [due + timedelta(minutes=90)]
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0]
+
+    monkeypatch.setattr(module, "datetime", Clock)
+    context.thread_id = None
+    row = await context.repository.create(
+        chat_id=1, thread_id=None, creator_id=0, title="Summary",
+        pages=[png()], source={"pages": ["<p>2 эпизода</p>"], "summary_run_id": 42},
+    )
+    await context.repository.session.commit()
+
+    repo = SimpleNamespace(
+        get_daily_summary_run_by_id=AsyncMock(return_value=SimpleNamespace(
+            chat_id=1, trigger="scheduled", summary_date=due.date(),
+            window_from=due - timedelta(days=1), window_to=due, claimed_at=due,
+            generated_text="<b>Итоги</b>", topics_json={"artifact_id": row.id},
+        )),
+        claim_daily_summary_delivery=AsyncMock(return_value=due),
+        is_daily_summary_delivery_claim_current=AsyncMock(return_value=True),
+        mark_daily_summary_run_sent=AsyncMock(return_value=True),
+        mark_daily_summary_run_send_failed=AsyncMock(),
+    )
+    monkeypatch.setattr(module, "SqlAlchemyActivityRepository", lambda session: repo)
+    bot = SimpleNamespace(send_message=AsyncMock(), send_photo=AsyncMock())
+
+    async def confirmed_photo(**kwargs):
+        clock[0] += timedelta(seconds=1)
+        return SimpleNamespace(message_id=201)
+
+    bot.send_photo.side_effect = confirmed_photo
+
+    assert await module._send_and_mark(
+        bot=bot, session_factory=lambda: context.repository.session,
+        chat_id=1, run_id=42, claimed_at=due,
+    ) is True
+    bot.send_photo.assert_awaited_once()
+    bot.send_message.assert_not_awaited()
+    assert row.delivery["complete"] is True
+    assert row.delivery["message_ids"] == [201]
+    repo.mark_daily_summary_run_sent.assert_awaited_once()
+    repo.mark_daily_summary_run_send_failed.assert_not_awaited()
+    # The clock crossed the cutoff only after the final confirmed send.
+    assert clock[0] > due + timedelta(minutes=90)

@@ -12,7 +12,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from selara.application.daily_summary.eligibility import evaluate_daily_summary_eligibility
 from selara.application.daily_summary.pipeline import DailySummaryClaimLost, run_daily_summary_pipeline
-from selara.application.daily_summary.schedule import compute_scheduled_window_to
+from selara.application.daily_summary.schedule import (
+    SCHEDULED_NEW_RUN_GRACE,
+    compute_scheduled_window_to,
+    is_stale_scheduled_window,
+)
 from selara.application.feature_access import (
     AccessReason,
     AccessTier,
@@ -41,6 +45,10 @@ logger = logging.getLogger(__name__)
 
 _POLL_INTERVAL_SECONDS = 900  # 15 minutes -- accuracy to the hour isn't critical (see TODO doc)
 _LEASE_SECONDS = 1800  # 30 minutes: how long a claim is considered "live" before it can be reclaimed
+# Scheduled delivery (and recovery of persisted generated/send_failed runs) is allowed
+# only within 90 minutes after the planned window_to; later digests are skipped, never
+# sent late or on the next day. Reuses the new-run grace value (same 90 minutes).
+_SCHEDULED_DELIVERY_MAX_AGE = SCHEDULED_NEW_RUN_GRACE
 _ACCESS_LOG_KEYS: OrderedDict[tuple[int, date, str], None] = OrderedDict()
 _MAX_ACCESS_LOG_KEYS = 4096
 _OWNER_DENIAL_CACHE_TTL = timedelta(hours=2)  # how long a scheduler remembers "owner is not admin here"
@@ -260,6 +268,30 @@ async def _send_and_mark(
             return False
         if run.claimed_at != claimed_at:
             return None
+        delivery_expired = False
+
+        def delivery_is_expired() -> bool:
+            nonlocal delivery_expired
+            now = datetime.now(timezone.utc)
+            if run.trigger != "scheduled" or not is_stale_scheduled_window(
+                scheduled_at=run.window_to, now=now,
+                grace=_SCHEDULED_DELIVERY_MAX_AGE,
+            ):
+                return False
+            if not delivery_expired:
+                logger.info("scheduled_skipped_stale_delivery", extra={
+                    "chat_id": chat_id, "run_id": run_id,
+                    "summary_date": run.summary_date.isoformat(), "trigger": "scheduled",
+                    "scheduled_at": run.window_to.isoformat(), "now": now.isoformat(),
+                    "window_from": run.window_from.isoformat(),
+                    "window_to": run.window_to.isoformat(),
+                    "reason": "outside_delivery_recovery_window",
+                })
+            delivery_expired = True
+            return True
+
+        if delivery_is_expired():
+            return False
 
         delivery_claimed_at = await repo.claim_daily_summary_delivery(
             run_id=run_id,
@@ -271,11 +303,14 @@ async def _send_and_mark(
             return None
 
         async def delivery_claim_is_current() -> bool:
-            return await repo.is_daily_summary_delivery_claim_current(
+            current = await repo.is_daily_summary_delivery_claim_current(
                 run_id=run_id,
                 chat_id=chat_id,
                 claimed_at=delivery_claimed_at,
             )
+            # Check the clock after awaited DB work, including artifact locks
+            # and pending-state commits, immediately before each Telegram call.
+            return current and not delivery_is_expired()
 
         try:
             artifact_id = (run.topics_json or {}).get("artifact_id")
@@ -290,11 +325,13 @@ async def _send_and_mark(
                     claim_check=delivery_claim_is_current,
                 )
                 if not result.success:
+                    if delivery_expired:
+                        return False
                     raise RuntimeError(result.result_text)
             else:
                 for chunk in split_telegram_html(run.generated_text):
                     if not await delivery_claim_is_current():
-                        return None
+                        return False if delivery_expired else None
                     await bot.send_message(chat_id=chat_id, text=chunk, parse_mode="HTML", disable_web_page_preview=True)
         except asyncio.CancelledError:
             raise
@@ -871,6 +908,66 @@ class DailySummaryScheduler:
         window_to = window_to_local.astimezone(timezone.utc)
         summary_date = window_to_local.date()
 
+        # The planning function intentionally returns yesterday before today's
+        # configured hour. A restart/late tick must not interpret that as
+        # permission to start costly *new* LLM generation for yesterday.
+        # Existing nonterminal runs keep their established recovery path.
+        async with self._session_factory() as session:
+            existing = await SqlAlchemyActivityRepository(session).get_daily_summary_run(
+                chat_id=chat.telegram_chat_id,
+                summary_date=summary_date,
+                trigger="scheduled",
+            )
+        if existing is not None and existing.status in {"claimed", "generating", "generated", "send_failed"} and is_stale_scheduled_window(
+            scheduled_at=existing.window_to, now=now_utc,
+            grace=_SCHEDULED_DELIVERY_MAX_AGE,
+        ):
+            logger.info("scheduled_skipped_stale_recovery", extra={
+                "chat_id": chat.telegram_chat_id,
+                "summary_date": summary_date.isoformat(), "trigger": "scheduled",
+                "status": existing.status,
+                "scheduled_at": existing.window_to.isoformat(), "now": now_utc.isoformat(),
+                "window_from": existing.window_from.isoformat(),
+                "window_to": existing.window_to.isoformat(),
+                "reason": "outside_delivery_recovery_window",
+            })
+            return False
+        if is_stale_scheduled_window(scheduled_at=window_to, now=now_utc) and (
+            existing is None or existing.status in {"sent", "failed"}
+        ):
+            logger.info(
+                "scheduled_skipped_stale",
+                extra={
+                    "chat_id": chat.telegram_chat_id,
+                    "summary_date": summary_date.isoformat(),
+                    "trigger": "scheduled",
+                    "timezone": str(local_tz),
+                    "hour": chat_settings.daily_summary_hour,
+                    "scheduled_at": window_to.isoformat(),
+                    "now": now_utc.isoformat(),
+                    "window_from": (window_to - timedelta(days=1)).isoformat(),
+                    "window_to": window_to.isoformat(),
+                    "reason": "outside_new_run_grace",
+                },
+            )
+            return False
+
+        # Structured scheduler events: the fields make it clear which timezone,
+        # planned hour and fixed 24h window a scheduled decision was made for.
+        event_fields = {
+            "chat_id": chat.telegram_chat_id,
+            "summary_date": summary_date.isoformat(),
+            "trigger": "scheduled",
+            "timezone": str(local_tz),
+            "hour": chat_settings.daily_summary_hour,
+            "scheduled_at": window_to.isoformat(),
+            "now": now_utc.isoformat(),
+            "window_from": (window_to - timedelta(hours=24)).isoformat(),
+            "window_to": window_to.isoformat(),
+        }
+        if existing is None or existing.status in {"claimed", "generating", "generated", "send_failed"}:
+            logger.info("scheduled_due", extra=event_fields)
+
         outcome = await attempt_daily_summary_run(
             bot=self._bot,
             session_factory=self._session_factory,
@@ -884,6 +981,21 @@ class DailySummaryScheduler:
             feature_access_service=self._feature_access_service,
             owner_denial_cache=self._owner_denial_cache,
         )
+        if outcome.sent:
+            logger.info("scheduled_sent", extra={**event_fields, "reason": outcome.reason})
+        elif outcome.reason == "not_eligible:not_enough_messages":
+            logger.info("scheduled_skipped_low_activity", extra={**event_fields, "reason": outcome.reason})
+        elif outcome.reason == "claim_lost":
+            async with self._session_factory() as session:
+                recent_send = await SqlAlchemyActivityRepository(session).has_recent_scheduled_send(
+                    chat_id=chat.telegram_chat_id, now=now_utc,
+                )
+            logger.info(
+                "scheduled_skipped_recent_send" if recent_send else "scheduled_claim_lost",
+                extra={**event_fields, "reason": outcome.reason},
+            )
+        elif outcome.reason != "already_run_today":
+            logger.info("scheduled_not_sent", extra={**event_fields, "reason": outcome.reason})
         return outcome.sent
 
 

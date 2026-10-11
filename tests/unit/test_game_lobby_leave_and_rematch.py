@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from selara.presentation.game_state import GameStore
+from selara.domain.entities import ChatRoleDefinition
 
 game_router = importlib.import_module("selara.presentation.handlers.game.router")
 
@@ -95,8 +96,23 @@ class FakeQuery:
 
 
 class FakeActivityRepo:
+    def __init__(self, *, can_manage_games: bool = True) -> None:
+        self.can_manage_games = can_manage_games
+
     async def get_chat_display_name(self, *, chat_id: int, user_id: int):
         return None
+
+    async def get_effective_role_definition(self, *, chat_id: int, user_id: int):
+        if not self.can_manage_games:
+            return None
+        return ChatRoleDefinition(
+            chat_id=chat_id,
+            role_code="game_master",
+            title_ru="Game Master",
+            rank=50,
+            permissions=("manage_games",),
+            is_system=False,
+        )
 
 
 def _chat_settings():
@@ -343,3 +359,70 @@ async def test_bunker_rematch_preserves_a_manually_tuned_seat_count(monkeypatch)
     new_game = safe_edit_mock.await_args.args[1]
     assert new_game.bunker_seats == 3
     assert new_game.bunker_seats_tuned is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("actor_id", [1, 2, 999])
+async def test_rematch_denies_missing_manage_games_even_for_old_owner(monkeypatch, actor_id: int) -> None:
+    store = GameStore()
+    monkeypatch.setattr(game_router, "GAME_STORE", store)
+    safe_edit = AsyncMock()
+    monkeypatch.setattr(game_router, "_safe_edit_or_send_game_board", safe_edit)
+    game = await _spy_lobby(store)
+    for uid in (2, 3):
+        await store.join(game_id=game.game_id, user_id=uid, user_label=f"u{uid}")
+    started, error = await store.start(game_id=game.game_id)
+    assert error is None
+    finished = await store.finish(game_id=started.game_id)
+    assert finished is not None
+
+    query = FakeQuery(user_id=actor_id, data=f"game:rematch:{game.game_id}")
+    await game_router.game_callback(
+        query, bot=SimpleNamespace(), chat_settings=_chat_settings(),
+        activity_repo=FakeActivityRepo(can_manage_games=False),
+        economy_repo=SimpleNamespace(),
+    )
+    assert query.answers[-1] == ("Недостаточно прав для запуска игр в этом чате.", True)
+    assert await store.list_active_games() == []
+    safe_edit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rematch_refuses_callback_from_another_chat(monkeypatch) -> None:
+    store = GameStore()
+    monkeypatch.setattr(game_router, "GAME_STORE", store)
+    game = await _spy_lobby(store)
+    query = FakeQuery(user_id=1, data=f"game:rematch:{game.game_id}")
+    query.message.chat.id = -200
+    await game_router.game_callback(
+        query, bot=SimpleNamespace(), chat_settings=_chat_settings(),
+        activity_repo=FakeActivityRepo(), economy_repo=SimpleNamespace(),
+    )
+    assert query.answers[-1][0] == "Эта кнопка из другого чата"
+
+
+@pytest.mark.asyncio
+async def test_rematch_double_click_only_opens_one_lobby(monkeypatch) -> None:
+    import asyncio
+
+    store = GameStore()
+    monkeypatch.setattr(game_router, "GAME_STORE", store)
+    monkeypatch.setattr(game_router, "_safe_edit_or_send_game_board", AsyncMock())
+    game = await _spy_lobby(store)
+    for uid in (2, 3):
+        await store.join(game_id=game.game_id, user_id=uid, user_label=f"u{uid}")
+    started, error = await store.start(game_id=game.game_id)
+    assert error is None
+    await store.finish(game_id=started.game_id)
+    queries = [FakeQuery(user_id=1, data=f"game:rematch:{game.game_id}") for _ in range(2)]
+    await asyncio.gather(*(
+        game_router.game_callback(
+            q, bot=SimpleNamespace(), chat_settings=_chat_settings(),
+            activity_repo=FakeActivityRepo(), economy_repo=SimpleNamespace(),
+        ) for q in queries
+    ))
+    assert len(await store.list_active_games()) == 1
+    assert sorted(q.answers[-1][0] for q in queries) == [
+        "В этом чате уже есть активная игра. Завершите её перед стартом новой.",
+        "Новая игра создана",
+    ]

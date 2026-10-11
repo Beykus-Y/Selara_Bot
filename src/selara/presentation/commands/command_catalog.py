@@ -723,6 +723,96 @@ COMMAND_CATALOG: tuple[CommandSpec, ...] = (
         natural_triggers=("объява", "рег", "анрег"),
         notes=("объява требует ранг команды, назначаемый /setrank.",),
     ),
+    CommandSpec(
+        key="clans_core",
+        category="clans",
+        dispatch_kind="natural_language",
+        syntax=(),
+        title_ru="Кланы",
+        description_ru=(
+            "Клан — объединение участников с общим списком. Создаётся, вступает и покидается "
+            "обычными фразами; создатель может удалить клан."
+        ),
+        natural_triggers=(
+            "клан",
+            "кланы",
+            "создать клан <название>",
+            "вступить в клан <название или id>",
+            "выйти из клана",
+            "удалить клан",
+        ),
+        notes=("Создатель не может выйти из клана — только удалить его.",),
+    ),
+    CommandSpec(
+        key="ai_group_questions",
+        category="ai",
+        dispatch_kind="natural_language",
+        syntax=(),
+        title_ru="Вопросы к AI-ассистенту группы",
+        description_ru=(
+            "Администратор пишет ? для ответа без контекста или ?? для продолжения "
+            "диалога в этой группе. Сбросить историю ?? можно через ?reset."
+        ),
+        natural_triggers=("? вопрос", "?? вопрос", "?reset"),
+        notes=(
+            "Работает только в группе при включённом llm_enabled и наличии права AI-ассистента.",
+            "Модерация, изменения ролей и другие действия требуют отдельных прав.",
+            "Лимиты и пауза между запросами отображаются в справке AI группы.",
+        ),
+    ),
+    CommandSpec(
+        key="ai_daily_summary",
+        category="ai",
+        dispatch_kind="slash",
+        syntax=("/summary",),
+        title_ru="Итоги дня",
+        description_ru=(
+            "Собирает итоги сообщений группы по запросу администратора; "
+            "автоматические итоги отдельно включаются в настройках чата."
+        ),
+        notes=(
+            "Нужно право настройки группы, сохранение сообщений и достаточная активность.",
+            "Ручные итоги имеют месячный лимит; автоматические требуют Selara AI для чата.",
+        ),
+    ),
+    CommandSpec(
+        key="ai_personal",
+        category="ai",
+        dispatch_kind="both",
+        syntax=("/ai", "/ai_reset"),
+        title_ru="Личный AI",
+        description_ru=(
+            "Личный AI открывается через /ai: характер, память и модель настраиваются там же, а остаток лимита виден в том же экране. "
+            "В личке обычное сообщение без / тоже уходит личному AI."
+        ),
+        notes=(
+            "/ai_reset работает только в личных сообщениях с ботом.",
+        ),
+    ),
+    CommandSpec(
+        key="subscriptions_selara",
+        category="subscriptions",
+        dispatch_kind="slash",
+        syntax=("/premium", "/terms", "/paysupport"),
+        title_ru="Подписки Personal и Chat AI",
+        description_ru=(
+            "/premium открывает выбор подписки: Personal привязан к пользователю, Chat AI — к выбранному чату. "
+            "/terms показывает условия, /paysupport — помощь по оплате."
+        ),
+        notes=("Цены и условия показываются внутри /premium и здесь не дублируются.",),
+    ),
+    CommandSpec(
+        key="admin_autocfg",
+        category="ai",
+        dispatch_kind="slash",
+        syntax=("/autocfg", "/autocfgcancel"),
+        title_ru="Настройка группы через ИИ",
+        description_ru=(
+            "/autocfg в личке с ботом помогает настроить группу через диалог с ИИ; "
+            "/autocfgcancel отменяет текущую настройку."
+        ),
+        notes=("В группе /autocfg отвечает подсказкой открыть личку с ботом.",),
+    ),
 )
 
 

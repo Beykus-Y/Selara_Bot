@@ -188,21 +188,27 @@ export function ChatSettingsView({
   const [pendingDocsHref, setPendingDocsHref] = useState<string | null>(null)
   const [isSavingDirtyChanges, setIsSavingDirtyChanges] = useState(false)
 
-  useEffect(() => {
+  // Reset server-backed drafts before children render a new server snapshot.
+  const [previousValues, setPreviousValues] = useState(initialValues)
+  const [previousAliasMode, setPreviousAliasMode] = useState(aliasModeSetting.current_value)
+  const [previousAliases, setPreviousAliases] = useState(initialAliasDrafts)
+  const [previousTriggers, setPreviousTriggers] = useState(initialTriggerDrafts)
+  if (initialValues !== previousValues) {
+    setPreviousValues(initialValues)
     setDraftValues(initialValues)
-  }, [initialValues])
-
-  useEffect(() => {
+  }
+  if (aliasModeSetting.current_value !== previousAliasMode) {
+    setPreviousAliasMode(aliasModeSetting.current_value)
     setAliasModeValue(aliasModeSetting.current_value)
-  }, [aliasModeSetting.current_value])
-
-  useEffect(() => {
+  }
+  if (initialAliasDrafts !== previousAliases) {
+    setPreviousAliases(initialAliasDrafts)
     setAliasDrafts(initialAliasDrafts)
-  }, [initialAliasDrafts])
-
-  useEffect(() => {
+  }
+  if (initialTriggerDrafts !== previousTriggers) {
+    setPreviousTriggers(initialTriggerDrafts)
     setTriggerDrafts(initialTriggerDrafts)
-  }, [initialTriggerDrafts])
+  }
 
   const dirtyEntries = useMemo(() => {
     const entries: DirtyEntry[] = []

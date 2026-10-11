@@ -180,7 +180,10 @@ def resolve_command_key_input(raw: str) -> str | None:
         return None
 
     if text.startswith("/"):
-        token = text[1:].split(maxsplit=1)[0].split("@", maxsplit=1)[0].strip().lower()
+        parts = text[1:].split(maxsplit=1)
+        if not parts:
+            return None
+        token = parts[0].split("@", maxsplit=1)[0].strip().lower()
         if not token:
             return None
         if token == "pet" and len(text.split(maxsplit=1)) > 1:

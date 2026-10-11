@@ -1,0 +1,71 @@
+{
+  "text_lines": [
+    "<b>Кто я</b>",
+    "<b>Этап:</b> Кто я: ответ",
+    "<b>Игроков:</b> 3",
+    "<b>Раунд:</b> 2",
+    "<i>Свою карточку вы не видите. Угадавший игрок продолжает отвечать на вопросы.</i>",
+    "",
+    "<b>Категория:</b> случайная тема",
+    "<b>Ходит:</b> <a href=\"tg://user?id=1\">Аня &lt;&amp;&gt; 🦊</a>",
+    "<b>Разгадали себя:</b> 0/3",
+    "<b>Вопрос:</b> Я человек &lt;&amp;&gt;?",
+    "<b>Сейчас:</b> ждём ответ стола.",
+    "<b>Что делать:</b> любой, кроме спрашивающего, отвечает кнопкой «да / нет / не знаю / неважно».",
+    "<i>Да — игрок задаёт следующий вопрос; нет / не знаю / неважно — ход переходит дальше.</i>",
+    "",
+    "<b>Последние ходы:</b> пока пусто."
+  ],
+  "public_keyboard": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "🪪 Карточки",
+          "url": "https://t.me/fixture_bot?start=game_fixture"
+        },
+        {
+          "text": "✅ Да",
+          "callback_data": "gwho:fixture:0:yes"
+        }
+      ],
+      [
+        {
+          "text": "❌ Нет",
+          "callback_data": "gwho:fixture:0:no"
+        },
+        {
+          "text": "🤷 Не знаю",
+          "callback_data": "gwho:fixture:0:unknown"
+        }
+      ],
+      [
+        {
+          "text": "🎭 Неважно",
+          "callback_data": "gwho:fixture:0:irrelevant"
+        }
+      ],
+      [
+        {
+          "text": "❓ Как играть",
+          "callback_data": "game:lrules:fixture"
+        },
+        {
+          "text": "⚙️ Ведущему",
+          "callback_data": "game:manage:fixture"
+        }
+      ]
+    ]
+  },
+  "manager_keyboard": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "🛑 Завершить",
+          "callback_data": "game:cancel:fixture"
+        }
+      ]
+    ]
+  },
+  "execution_prompt_lines": null,
+  "execution_keyboard": null
+}

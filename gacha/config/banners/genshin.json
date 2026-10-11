@@ -1394,6 +1394,102 @@
       "weight": 2.0,
       "region_code": "inazuma",
       "element_code": "pyro"
+    },
+    {
+      "code": "alyosha",
+      "name": "Алёша",
+      "rarity": "epic",
+      "points": 5400,
+      "primogems": 18,
+      "adventure_xp": 160,
+      "image_url": "/images/genshin/alyosha.jpg",
+      "weight": 18.0,
+      "region_code": "snezhnaya",
+      "element_code": "electro"
+    },
+    {
+      "code": "nicole",
+      "name": "Николь",
+      "rarity": "legendary",
+      "points": 10000,
+      "primogems": 22,
+      "adventure_xp": 220,
+      "image_url": "/images/genshin/nicole.jpg",
+      "weight": 2.0,
+      "region_code": "mondstadt",
+      "element_code": "pyro"
+    },
+    {
+      "code": "odette",
+      "name": "Одетта",
+      "rarity": "legendary",
+      "points": 10000,
+      "primogems": 22,
+      "adventure_xp": 220,
+      "image_url": "/images/genshin/odette.jpg",
+      "weight": 2.0,
+      "region_code": "snezhnaya",
+      "element_code": "cryo"
+    },
+    {
+      "code": "prune",
+      "name": "Прюн",
+      "rarity": "epic",
+      "points": 5400,
+      "primogems": 18,
+      "adventure_xp": 160,
+      "image_url": "/images/genshin/prune.jpg",
+      "weight": 18.0,
+      "region_code": "mondstadt",
+      "element_code": "anemo"
+    },
+    {
+      "code": "sandrone",
+      "name": "Сандроне",
+      "rarity": "legendary",
+      "points": 10000,
+      "primogems": 22,
+      "adventure_xp": 220,
+      "image_url": "/images/genshin/sandrone.jpg",
+      "weight": 2.0,
+      "region_code": "snezhnaya",
+      "element_code": "cryo"
+    },
+    {
+      "code": "chevreuse",
+      "name": "Шеврёз",
+      "rarity": "epic",
+      "points": 5400,
+      "primogems": 18,
+      "adventure_xp": 160,
+      "image_url": "/images/genshin/chevreuse.jpg",
+      "weight": 18.0,
+      "region_code": "fontaine",
+      "element_code": "pyro"
+    },
+    {
+      "code": "vesna",
+      "name": "Весна",
+      "rarity": "legendary",
+      "points": 10000,
+      "primogems": 22,
+      "adventure_xp": 220,
+      "image_url": "/images/genshin/vesna.jpg",
+      "weight": 2.0,
+      "region_code": "snezhnaya",
+      "element_code": "anemo"
+    },
+    {
+      "code": "vodyanitsa",
+      "name": "Водяница",
+      "rarity": "legendary",
+      "points": 10000,
+      "primogems": 22,
+      "adventure_xp": 220,
+      "image_url": "/images/genshin/vodyanitsa.jpg",
+      "weight": 2.0,
+      "region_code": "snezhnaya",
+      "element_code": "hydro"
     }
   ]
 }

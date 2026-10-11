@@ -165,7 +165,7 @@
     },
     {
       "code": "cinlyu",
-      "name": "Цинлю",
+      "name": "Цзинлю",
       "rarity": "legendary",
       "points": 11000,
       "primogems": 22,
@@ -185,7 +185,7 @@
     },
     {
       "code": "jingliu",
-      "name": "Цзинлю",
+      "name": "Юньли",
       "rarity": "legendary",
       "points": 11000,
       "primogems": 22,
@@ -495,7 +495,7 @@
     },
     {
       "code": "lyka",
-      "name": "Рысь",
+      "name": "Лука",
       "rarity": "epic",
       "points": 5000,
       "primogems": 16,
@@ -791,6 +791,46 @@
       "primogems": 22,
       "adventure_xp": 200,
       "image_url": "/images/hsr/svyatlechok.jpg",
+      "weight": 1
+    },
+    {
+      "code": "evanescia",
+      "name": "Эванесса",
+      "rarity": "legendary",
+      "points": 11000,
+      "primogems": 22,
+      "adventure_xp": 200,
+      "image_url": "/images/hsr/evanescia.jpg",
+      "weight": 1
+    },
+    {
+      "code": "gilgamesh",
+      "name": "Гильгамеш",
+      "rarity": "legendary",
+      "points": 11000,
+      "primogems": 22,
+      "adventure_xp": 200,
+      "image_url": "/images/hsr/gilgamesh.jpg",
+      "weight": 1
+    },
+    {
+      "code": "pearl",
+      "name": "Жемчуг",
+      "rarity": "legendary",
+      "points": 11000,
+      "primogems": 22,
+      "adventure_xp": 200,
+      "image_url": "/images/hsr/pearl.jpg",
+      "weight": 1
+    },
+    {
+      "code": "rin_tohsaka",
+      "name": "Рин Тосака",
+      "rarity": "legendary",
+      "points": 11000,
+      "primogems": 22,
+      "adventure_xp": 200,
+      "image_url": "/images/hsr/rin_tohsaka.jpg",
       "weight": 1
     }
   ]

@@ -303,3 +303,12 @@ async def test_tainted_history_is_replaced_by_a_placeholder_for_later_turns(sess
     _, recent = await load_history(repo, user_id=USER_ID, thread="assistant")
 
     assert [m.content for m in recent] == ["что нового?", WEB_ANSWER_PLACEHOLDER, "Обычный ответ"]
+
+
+async def test_model_without_tool_support_denies_artifacts_even_for_paid_user(monkeypatch, session):
+    await _arrange(monkeypatch, session, web=False, artifacts=True, personal=True)
+    stored = await PersonalAiRepository(session).get_profile(USER_ID)
+    choice = SimpleNamespace(effective=SimpleNamespace(capabilities=SimpleNamespace(supports_tools=False)))
+    deps = SimpleNamespace(web_available=False)
+    flags = await handler._tool_flags(USER_ID, stored, choice, deps)
+    assert flags is None  # caller does not create a PersonalToolRun or offer schemas

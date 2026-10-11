@@ -19,6 +19,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.enums import ContentType
 from aiogram.types import BufferedInputFile, ReactionTypeEmoji
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -652,6 +653,49 @@ async def _build_achievement_sections(
 
 # Owner JSON APIs (Mini App and the /app/admin AI settings) answer errors as JSON, never as HTML status pages.
 _ADMIN_API_PREFIXES = ("/" + "api/miniapp/admin/", "/" + "app/admin/api/")
+
+
+_WEB_GAME_CONFIRM_TTL_SECONDS = 120
+
+
+def _web_game_confirm_callback(
+    *, action: str, game: GroupGame, user_id: int, secret: str,
+    now: int | None = None,
+) -> str:
+    """Create an expiring, actor-bound stop/reveal token for the active phase."""
+    if action not in {"stop", "reveal"} or game.status != "started":
+        raise ValueError("Cannot confirm this game action")
+    issued = int(datetime.now(timezone.utc).timestamp()) if now is None else now
+    data = f"{action}:{game.game_id}:{game.status}:{game.phase}:{game.round_no}:{issued}:{user_id}"
+    signature = hmac.new(secret.encode(), data.encode(), hashlib.sha256).hexdigest()[:24]
+    return (
+        f"game:confirm:{action}:{game.game_id}:{game.status}:"
+        f"{game.phase}:{game.round_no}:{issued}:{signature}"
+    )
+
+
+def _verify_web_game_confirm_callback(
+    callback_data: str, *, game: GroupGame, user_id: int, secret: str,
+    now: int | None = None,
+) -> str | None:
+    """Verify signed confirmation; GameStore separately enforces atomic state."""
+    parts = callback_data.split(":")
+    if len(parts) != 9 or parts[:2] != ["game", "confirm"]:
+        return None
+    _, _, action, gid, status, phase, raw_round, raw_issued, signature = parts
+    if action not in {"stop", "reveal"} or gid != game.game_id or status != "started":
+        return None
+    if not raw_round.isdigit() or not raw_issued.isdigit():
+        return None
+    issued = int(raw_issued)
+    current = int(datetime.now(timezone.utc).timestamp()) if now is None else now
+    if issued > current or current - issued > _WEB_GAME_CONFIRM_TTL_SECONDS:
+        return None
+    if game.status != status or game.phase != phase or game.round_no != int(raw_round):
+        return None
+    data = f"{action}:{gid}:{status}:{phase}:{raw_round}:{issued}:{user_id}"
+    expected = hmac.new(secret.encode(), data.encode(), hashlib.sha256).hexdigest()[:24]
+    return action if hmac.compare_digest(expected, signature) else None
 
 
 def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[AsyncSession]) -> FastAPI:
@@ -1627,6 +1671,17 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return None
         if parts[0] == "game" and len(parts) == 3:
             return parts[2]
+        if parts[0] == "game" and len(parts) == 6 and parts[1] == "adv":
+            return parts[2]
+        if parts[0] == "game" and len(parts) == 9 and parts[1] == "confirm":
+            return parts[3]
+        if parts[0] in {
+            "gquiz", "gwho", "gbredcat", "gbred", "gzlobp", "gzlobv",
+            "gbkv", "gmact", "gmvote", "gmconfirm",
+        } and len(parts) == 4:
+            return parts[1]
+        if parts[0] == "gbkr" and len(parts) == 5:
+            return parts[1]
         if parts[0] in {
             "gcfg",
             "gquiz",
@@ -1767,6 +1822,10 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 continue
 
             callback_data = button.get("callback_data", "")
+            # Telegram-only navigation opens a message in chat; the web
+            # dashboard provides its own navigation and controls.
+            if callback_data.startswith(("game:manage:", "game:lrules:")):
+                continue
             if callback_data.startswith("gbredcat:"):
                 grouped["category_buttons"].append(button)
                 continue
@@ -3346,7 +3405,40 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 is_member=is_member,
             )
             grouped_board_buttons = _group_game_buttons(game, board_buttons)
-            manage_buttons = grouped_board_buttons["manage_buttons"]
+            manage_buttons = list(grouped_board_buttons["manage_buttons"])
+            if game.status == "started" and can_manage_games:
+                # GUX-03 moved manager-only actions off the shared Telegram
+                # board. The authenticated web panel remains role-filtered
+                # and must explicitly display that separate manager surface.
+                web_manager_buttons = _keyboard_to_buttons(
+                    game_router_module._build_game_manager_controls(game),
+                    game=game,
+                    user_id=user.telegram_user_id,
+                    can_manage_games=can_manage_games,
+                    is_member=is_member,
+                )
+                for button in web_manager_buttons:
+                    if button.get("callback_data", "").startswith("game:adv:"):
+                        # Preserve the immutable phase/round/step token from the
+                        # rendered controls. Stripping it makes stale web tabs
+                        # capable of advancing a newer game state.
+                        button = {**button, "variant": "primary"}
+                    manage_buttons.append(button)
+            if can_manage_games and game.status == "started":
+                # A browser click must open an explicit confirmation before
+                # submitting a signed token. Never expose raw destructive
+                # callbacks for running games.
+                for button in manage_buttons:
+                    action = (
+                        "stop" if button.get("callback_data") == f"game:cancel:{game.game_id}"
+                        else "reveal" if button.get("callback_data") == f"game:reveal:{game.game_id}"
+                        else None
+                    )
+                    if action is not None:
+                        button["callback_data"] = _web_game_confirm_callback(
+                            action=action, game=game, user_id=user.telegram_user_id,
+                            secret=settings.resolved_web_auth_secret,
+                        )
             if game.kind == "spy":
                 manage_buttons = [
                     button
@@ -3689,11 +3781,57 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
         economy_repo: SqlAlchemyEconomyRepository,
     ) -> tuple[bool, str]:
         parts = callback_data.split(":")
-        if len(parts) != 3:
+        versioned_games = {"gquiz", "gwho", "gbredcat", "gbred", "gzlobp", "gzlobv"}
+        round_actions = {"gbkv", "gmact", "gmvote", "gmconfirm"}
+        is_web_confirmation = len(parts) == 9 and parts[:2] == ["game", "confirm"]
+        is_versioned_advance = len(parts) == 6 and parts[:2] == ["game", "adv"]
+        if not is_web_confirmation and (
+            len(parts) not in {3, 4, 5, 6}
+            or (len(parts) == 4 and parts[0] not in versioned_games | round_actions)
+            or (len(parts) == 5 and parts[0] != "gbkr")
+            or (len(parts) == 6 and not is_versioned_advance)
+        ):
             return False, "Некорректные параметры игрового действия."
 
         prefix = parts[0]
-        payload = parts[2]
+        payload = parts[-1]
+        if is_versioned_advance:
+            _, _, callback_game_id, expected_phase, expected_round_raw, expected_step_raw = parts
+            if (
+                callback_game_id != game.game_id
+                or not expected_round_raw.isdecimal()
+                or not expected_step_raw.isdecimal()
+                or game.status != "started"
+                or game.phase != expected_phase
+                or game.round_no != int(expected_round_raw)
+                or game_router_module._manager_advance_step(game) != int(expected_step_raw)
+            ):
+                return False, "Действие устарело. Обновите страницу игры."
+        if prefix in versioned_games and prefix != "gquiz":
+            if len(parts) != 4 or not parts[2].isdigit():
+                return False, "Старая игровая кнопка. Обновите страницу."
+            if game.status != "started" or (
+                prefix != "gwho" and game.round_no != int(parts[2])
+            ) or (
+                prefix == "gwho" and game_router_module._whoami_question_token(game) != int(parts[2])
+            ):
+                return False, "Действие устарело. Обновите текущую партию."
+        if prefix in round_actions | {"gbkr"}:
+            if len(parts) < 4 or not parts[2].isdigit():
+                return False, "Старая игровая кнопка. Обновите страницу."
+            if game.status != "started" or game.round_no != int(parts[2]):
+                return False, "Действие прошлого раунда. Обновите страницу."
+            required_phase = {
+                "gbkr": "bunker_reveal", "gbkv": "bunker_vote",
+                "gmact": "night", "gmvote": "day_vote", "gmconfirm": "day_execution_confirm",
+            }[prefix]
+            if game.phase != required_phase:
+                return False, "Эта фаза завершена. Обновите страницу."
+            if prefix == "gbkr" and (
+                len(parts) != 5 or not parts[3].isdigit()
+                or game.bunker_reveal_cursor != int(parts[3])
+            ):
+                return False, "Ход раскрытия завершён. Обновите страницу."
 
         if prefix == "gcfg":
             if not can_manage_games:
@@ -3814,7 +3952,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return False, "Неизвестная настройка игры."
 
         if prefix == "game":
-            action = parts[1]
+            action = "advance" if is_versioned_advance else parts[1]
             if action == "join":
                 updated_game, status = await GAME_STORE.join(game_id=game.game_id, user_id=user.telegram_user_id, user_label=actor_label)
                 if updated_game is None:
@@ -3909,42 +4047,86 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     return True, success_message
                 return True, success_message
 
-            if action in {"cancel", "advance", "reveal"} and not can_manage_games:
+            if action in {"cancel", "advance", "reveal", "confirm"} and not can_manage_games:
                 return False, "Недостаточно прав для управления игрой."
 
-            if action == "cancel":
-                game_router_module._cancel_phase_timer(game.game_id)
-                if game.kind == "quiz":
-                    await game_router_module._sync_quiz_feed_message(bot, game, question_no=None)
-                finished_game = await GAME_STORE.finish(game_id=game.game_id, winner_text="Игра остановлена ведущим.")
-                if finished_game is None:
-                    return False, "Игра не найдена."
-                await game_router_module._safe_edit_or_send_game_board(
-                    bot,
-                    finished_game,
-                    chat_settings,
-                    include_reveal=(finished_game.kind in {"spy", "mafia"}),
+            if action == "confirm":
+                confirmed = _verify_web_game_confirm_callback(
+                    callback_data, game=game, user_id=user.telegram_user_id,
+                    secret=settings.resolved_web_auth_secret,
                 )
-                await game_router_module._send_game_feed_event(bot, finished_game, text="<b>Ведущий:</b> Игра остановлена ведущим.")
-                return True, "Игра завершена."
+                if confirmed is None:
+                    return False, "Подтверждение устарело или недействительно. Обновите страницу."
+                if confirmed == "reveal" and game.kind != "spy":
+                    return False, "Раскрывать роли можно только в игре «Шпион»."
+
+                winner_text = (
+                    "Игра остановлена ведущим." if confirmed == "stop"
+                    else "Игра завершена по решению ведущего."
+                )
+                # Atomically collect the live-question ID before finish()
+                # clears it. The GameStore lock excludes concurrent publication,
+                # while the publisher deletes any question sent after completion.
+                quiz_feed_cleanup_ids: list[int] = []
+                finished_game = await GAME_STORE.finish(
+                    game_id=game.game_id,
+                    winner_text=winner_text,
+                    expected_status="started",
+                    expected_phase=game.phase,
+                    expected_round_no=game.round_no,
+                    quiz_feed_cleanup_ids=quiz_feed_cleanup_ids,
+                )
+                if finished_game is None:
+                    return False, "Партия уже изменилась. Действие не выполнено."
+                game_router_module._cancel_phase_timer(finished_game.game_id)
+                for quiz_feed_message_id in quiz_feed_cleanup_ids:
+                    try:
+                        await bot.delete_message(
+                            chat_id=finished_game.chat_id, message_id=quiz_feed_message_id,
+                        )
+                    except (TelegramBadRequest, TelegramForbiddenError):
+                        # Same best-effort semantics as the Telegram quiz-feed cleanup.
+                        pass
+                await game_router_module._safe_edit_or_send_game_board(
+                    bot, finished_game, chat_settings,
+                    include_reveal=(confirmed == "reveal" or finished_game.kind in {"spy", "mafia"}),
+                )
+                await game_router_module._send_game_feed_event(
+                    bot, finished_game,
+                    text=(
+                        "<b>Ведущий:</b> Игра «Шпион» завершена, роли раскрыты."
+                        if confirmed == "reveal" else "<b>Ведущий:</b> Игра остановлена ведущим."
+                    ),
+                )
+                return True, "Роли раскрыты." if confirmed == "reveal" else "Игра завершена."
+
+            if action == "cancel":
+                if game.status != "lobby":
+                    return False, "Для остановки активной игры требуется подтверждение с актуальной страницы."
+                # A disposable lobby is the one-step exception, as in Telegram.
+                finished_game = await GAME_STORE.finish(
+                    game_id=game.game_id,
+                    winner_text="Лобби отменено ведущим.",
+                    expected_status="lobby",
+                    expected_phase="lobby",
+                )
+                if finished_game is None:
+                    return False, "Лобби уже изменилось. Ничего не изменено."
+                await game_router_module._safe_edit_or_send_game_board(bot, finished_game, chat_settings)
+                return True, "Лобби отменено."
 
             if action == "reveal":
-                if game.kind != "spy" or game.status != "started":
-                    return False, "Раскрытие доступно только в активной игре «Шпион»."
-                finished_game = await GAME_STORE.finish(game_id=game.game_id, winner_text="Игра завершена по решению ведущего.")
-                if finished_game is None:
-                    return False, "Игра не найдена."
-                await game_router_module._safe_edit_or_send_game_board(bot, finished_game, chat_settings, include_reveal=True)
-                await game_router_module._send_game_feed_event(
-                    bot,
-                    finished_game,
-                    text="<b>Ведущий:</b> Игра «Шпион» завершена, роли раскрыты.",
-                )
-                return True, "Роли раскрыты."
+                # Legacy 3-part Mini App callbacks must never bypass confirmation.
+                return False, "Раскрытие ролей требует подтверждения с актуальной страницы."
 
             if action == "advance":
+                if not is_versioned_advance:
+                    return False, "Старая кнопка управления. Обновите страницу игры."
                 if game.status != "started":
                     return False, "Игра уже завершена."
+                # Snapshot the rendered button version before any awaited handlers.
+                advance_phase = parts[3]
+                advance_round = int(parts[4])
                 if game.kind == "quiz":
                     _, error = await game_router_module._resolve_quiz_round(
                         bot,
@@ -3953,11 +4135,12 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                         economy_repo=economy_repo,
                         force=True,
                         triggered_by_auto=False,
+                        expected_question_index=int(parts[5]),
                     )
                     return (error is None), (error or "Вопрос закрыт и обработан.")
                 if game.kind == "bredovukha":
-                    if game.phase == "category_pick":
-                        opened_game, category, error = await GAME_STORE.bred_force_pick_category(game_id=game.game_id)
+                    if advance_phase == "category_pick":
+                        opened_game, category, error = await GAME_STORE.bred_force_pick_category(game_id=game.game_id, expected_round_no=advance_round)
                         if opened_game is None:
                             return False, "Игра не найдена."
                         if error:
@@ -3968,8 +4151,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                             note = f"{note}\n<b>ЛС недоступно:</b> {failed_dm} игрок(ов)."
                         await game_router_module._safe_edit_or_send_game_board(bot, opened_game, chat_settings, note=note)
                         return True, "Категория выбрана случайно."
-                    if game.phase == "private_answers":
-                        opened_game, error = await GAME_STORE.bred_open_vote(game_id=game.game_id, force=True)
+                    if advance_phase == "private_answers":
+                        opened_game, error = await GAME_STORE.bred_open_vote(game_id=game.game_id, force=True, expected_round_no=advance_round)
                         if opened_game is None:
                             return False, "Игра не найдена."
                         if error:
@@ -3981,7 +4164,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                             note="<b>Этап:</b> сбор ответов завершён, открыто голосование.",
                         )
                         return True, "Открыто голосование."
-                    if game.phase == "public_vote":
+                    if advance_phase == "public_vote":
                         _, error = await game_router_module._resolve_bred_round(
                             bot,
                             game.game_id,
@@ -3989,12 +4172,17 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                             economy_repo=economy_repo,
                             force=True,
                             triggered_by_auto=False,
+                            expected_round_no=advance_round,
                         )
                         return (error is None), (error or "Голосование завершено.")
                     return False, "Сейчас нет шага для переключения."
                 if game.kind == "bunker":
-                    if game.phase == "bunker_reveal":
-                        updated_game, result, error = await GAME_STORE.bunker_force_advance_reveal(game_id=game.game_id)
+                    if advance_phase == "bunker_reveal":
+                        updated_game, result, error = await GAME_STORE.bunker_force_advance_reveal(
+                            game_id=game.game_id,
+                            expected_round_no=advance_round,
+                            expected_reveal_cursor=int(parts[5]),
+                        )
                         if updated_game is None:
                             return False, "Игра не найдена."
                         if error or result is None:
@@ -4008,7 +4196,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                             await game_router_module._notify_bunker_reveal_turn(bot, updated_game)
                         await game_router_module._safe_edit_or_send_game_board(bot, updated_game, chat_settings, note=note)
                         return True, "Ход переключён."
-                    if game.phase == "bunker_vote":
+                    if advance_phase == "bunker_vote":
                         _, error = await game_router_module._resolve_bunker_vote(
                             bot,
                             game.game_id,
@@ -4016,22 +4204,24 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                             economy_repo=economy_repo,
                             force=True,
                             triggered_by_auto=False,
+                            expected_round_no=advance_round,
                         )
                         return (error is None), (error or "Голосование завершено.")
                     return False, "Сейчас нет шага для переключения."
                 if game.kind == "zlobcards":
-                    if game.phase == "private_answers":
+                    if advance_phase == "private_answers":
                         opened_game, error = await game_router_module._open_zlob_vote_phase(
                             bot,
                             game.game_id,
                             chat_settings,
                             force=True,
                             triggered_by_auto=False,
+                            expected_round_no=advance_round,
                         )
                         if opened_game is None:
                             return False, "Игра не найдена."
                         return (error is None), (error or "Открыто голосование.")
-                    if game.phase == "public_vote":
+                    if advance_phase == "public_vote":
                         _, error = await game_router_module._resolve_zlob_round(
                             bot,
                             game.game_id,
@@ -4039,50 +4229,51 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                             economy_repo=economy_repo,
                             force=True,
                             triggered_by_auto=False,
+                            expected_round_no=advance_round,
                         )
                         return (error is None), (error or "Раунд обработан.")
                     return False, "Сейчас нет шага для переключения."
                 if game.kind != "mafia":
                     return False, "Авто-переход доступен для мафии, викторины, Бредовухи, Бункера и Злобных Карт."
-                if game.phase == "night":
-                    game_router_module._cancel_phase_timer(game.game_id)
-                    await game_router_module._advance_mafia_night(
+                if advance_phase == "night":
+                    changed = await game_router_module._advance_mafia_night(
                         bot,
                         game.game_id,
                         chat_settings,
                         economy_repo=economy_repo,
                         triggered_by_timer=False,
+                        expected_round_no=advance_round,
                     )
-                    return True, "Ночь завершена."
-                if game.phase == "day_discussion":
-                    game_router_module._cancel_phase_timer(game.game_id)
-                    await game_router_module._open_mafia_day_vote(
+                    return (changed, "Ночь завершена." if changed else "Действие устарело. Обновите страницу игры.")
+                if advance_phase == "day_discussion":
+                    changed = await game_router_module._open_mafia_day_vote(
                         bot,
                         game.game_id,
                         chat_settings,
                         triggered_by_timer=False,
+                        expected_round_no=advance_round,
                     )
-                    return True, "Обсуждение завершено, открыто голосование."
-                if game.phase == "day_vote":
-                    game_router_module._cancel_phase_timer(game.game_id)
-                    await game_router_module._resolve_mafia_day_vote(
-                        bot,
-                        game.game_id,
-                        chat_settings,
-                        economy_repo=economy_repo,
-                        triggered_by_timer=False,
-                    )
-                    return True, "Дневное голосование завершено."
-                if game.phase == "day_execution_confirm":
-                    game_router_module._cancel_phase_timer(game.game_id)
-                    await game_router_module._resolve_mafia_execution_confirm(
+                    return (changed, "Обсуждение завершено, открыто голосование." if changed else "Действие устарело. Обновите страницу игры.")
+                if advance_phase == "day_vote":
+                    changed = await game_router_module._resolve_mafia_day_vote(
                         bot,
                         game.game_id,
                         chat_settings,
                         economy_repo=economy_repo,
                         triggered_by_timer=False,
+                        expected_round_no=advance_round,
                     )
-                    return True, "Подтверждение казни завершено."
+                    return (changed, "Дневное голосование завершено." if changed else "Действие устарело. Обновите страницу игры.")
+                if advance_phase == "day_execution_confirm":
+                    changed = await game_router_module._resolve_mafia_execution_confirm(
+                        bot,
+                        game.game_id,
+                        chat_settings,
+                        economy_repo=economy_repo,
+                        triggered_by_timer=False,
+                        expected_round_no=advance_round,
+                    )
+                    return (changed, "Подтверждение казни завершено." if changed else "Действие устарело. Обновите страницу игры.")
                 return False, "Сейчас нет шага для переключения."
 
             return False, "Неизвестное игровое действие."
@@ -4118,6 +4309,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return True, f"Бросок принят: {result.roll_value}"
 
         if prefix == "gquiz":
+            if len(parts) != 4 or not parts[2].isdigit():
+                return False, "Устаревшая кнопка викторины. Обновите страницу."
             if not payload.isdigit():
                 return False, "Некорректный вариант ответа."
             option_index = int(payload)
@@ -4125,6 +4318,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 game_id=game.game_id,
                 user_id=user.telegram_user_id,
                 option_index=option_index,
+                expected_chat_id=game.chat_id,
+                expected_question_index=int(parts[2]),
             )
             if error:
                 return False, error
@@ -4153,6 +4348,15 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return True, "Ответ принят."
 
         if prefix == "gspy":
+            if payload == "mine":
+                if user.telegram_user_id not in game.players or game.status != "started":
+                    return False, "Вы не участник активной игры."
+                choice = game.spy_votes.get(user.telegram_user_id)
+                return (
+                    True,
+                    "Вы ещё не голосовали."
+                    if choice is None else f"Ваш голос: {game.players.get(choice, f'user:{choice}')}.",
+                )
             if not payload.isdigit():
                 return False, "Некорректная цель голосования."
             target_user_id = int(payload)
@@ -4210,6 +4414,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 game_id=game.game_id,
                 responder_user_id=user.telegram_user_id,
                 answer_code=payload,  # type: ignore[arg-type]
+                expected_question_version=int(parts[2]),
+                expected_chat_id=game.chat_id,
             )
             if error:
                 return False, error
@@ -4252,6 +4458,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 game_id=game.game_id,
                 user_id=user.telegram_user_id,
                 card_indexes=card_indexes,
+                expected_round_no=int(parts[2]),
+                expected_chat_id=game.chat_id,
             )
             if error:
                 return False, error
@@ -4308,6 +4516,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 game_id=game.game_id,
                 voter_user_id=user.telegram_user_id,
                 option_index=option_index,
+                expected_round_no=int(parts[2]),
+                expected_chat_id=game.chat_id,
             )
             if error:
                 return False, error
@@ -4350,6 +4560,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 game_id=game.game_id,
                 actor_user_id=user.telegram_user_id,
                 option_index=option_index,
+                expected_round_no=int(parts[2]),
+                expected_chat_id=game.chat_id,
             )
             if error:
                 return False, error
@@ -4374,6 +4586,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 game_id=game.game_id,
                 voter_user_id=user.telegram_user_id,
                 option_index=option_index,
+                expected_round_no=int(parts[2]),
+                expected_chat_id=game.chat_id,
             )
             if error:
                 return False, error
@@ -4404,6 +4618,9 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 game_id=game.game_id,
                 actor_user_id=user.telegram_user_id,
                 field_key=payload,
+                expected_round_no=int(parts[2]),
+                expected_reveal_cursor=int(parts[3]),
+                expected_chat_id=game.chat_id,
             )
             if error:
                 return False, error
@@ -4432,6 +4649,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 game_id=game.game_id,
                 voter_user_id=user.telegram_user_id,
                 target_user_id=target_user_id,
+                expected_round_no=int(parts[2]),
+                expected_chat_id=game.chat_id,
             )
             if error:
                 return False, error
@@ -4465,6 +4684,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 game_id=game.game_id,
                 actor_user_id=user.telegram_user_id,
                 target_user_id=target_user_id,
+                expected_round_no=int(parts[2]),
             )
             if error:
                 return False, error
@@ -4491,6 +4711,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 game_id=game.game_id,
                 voter_user_id=user.telegram_user_id,
                 target_user_id=target_user_id,
+                expected_round_no=int(parts[2]),
             )
             if error:
                 return False, error
@@ -4524,6 +4745,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 game_id=game.game_id,
                 voter_user_id=user.telegram_user_id,
                 approve=approve,
+                expected_round_no=int(parts[2]),
             )
             if error:
                 return False, error

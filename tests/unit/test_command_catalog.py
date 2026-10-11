@@ -388,3 +388,44 @@ def test_social_natural_language_triggers_are_real() -> None:
     # ad-hoc regex dispatch class as /article, not the mechanism most other
     # "slash" entries in this catalog use.
     assert "naming" not in _real_aiogram_commands("help.py", "text_commands.py", "engagement.py")
+
+
+def _real_single_or_double_quoted_commands(filename: str) -> set[str]:
+    # autoconfig.py registers its commands with single quotes, unlike the rest of handlers/.
+    source = _real_source_text(filename)
+    return set(re.findall(r"Command\(['\"]([a-zA-Z0-9_]+)['\"]\)", source))
+
+
+def test_clan_natural_triggers_match_the_real_clans_handlers() -> None:
+    source = _real_source_text("clans.py")
+    spec = get_command_spec("clans_core")
+    assert spec.natural_triggers, "clans_core must list its natural-language triggers"
+    for trigger in spec.natural_triggers:
+        # "создать клан <название>" -> "создать клан"; the handler matches the literal prefix.
+        head = re.split(r" [<\[]", trigger)[0]
+        assert head in source, f"clans_core: {trigger!r} is not a literal in clans.py"
+
+
+def test_personal_ai_commands_match_real_registrations() -> None:
+    real_commands = _real_aiogram_commands("personal_ai.py")
+    spec = get_command_spec("ai_personal")
+    for syntax_entry in spec.syntax:
+        assert _base_command_word(syntax_entry) in real_commands, f"ai_personal: {syntax_entry!r} not registered"
+
+
+def test_subscription_commands_match_real_registrations() -> None:
+    real_commands = _real_aiogram_commands("premium.py")
+    spec = get_command_spec("subscriptions_selara")
+    for syntax_entry in spec.syntax:
+        assert _base_command_word(syntax_entry) in real_commands, (
+            f"subscriptions_selara: {syntax_entry!r} not registered in premium.py"
+        )
+
+
+def test_autocfg_commands_match_real_registrations() -> None:
+    real_commands = _real_single_or_double_quoted_commands("autoconfig.py")
+    spec = get_command_spec("admin_autocfg")
+    for syntax_entry in spec.syntax:
+        assert _base_command_word(syntax_entry) in real_commands, (
+            f"admin_autocfg: {syntax_entry!r} not registered in autoconfig.py"
+        )

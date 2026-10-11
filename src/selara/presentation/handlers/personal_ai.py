@@ -74,8 +74,13 @@ from selara.presentation.feature_access_messages import (
 )
 from selara.presentation.handlers import personal_memory
 from selara.presentation.handlers.premium import personal_offer_available
-from selara.presentation.handlers.private_panel import _get_pending_admin_input, _get_pending_cfg_input
+from selara.presentation.handlers.private_panel import (
+    _get_pending_admin_input,
+    _get_pending_cfg_input,
+    _reset_home_pending,
+)
 from selara.presentation.llm_formatting import html_to_plain_text, render_llm_html
+from selara.presentation.navigation.contract import BACK_LABEL, HOME_LABEL
 
 log = logging.getLogger(__name__)
 
@@ -114,6 +119,11 @@ def _get_pending_input(user_id: int) -> _PendingInput | None:
 
 def _set_pending_input(user_id: int, field: str) -> None:
     _pending_inputs[user_id] = _PendingInput(field=field, expires_at=datetime.now(timezone.utc) + _PENDING_TTL)
+
+
+def clear_pending_input(user_id: int) -> None:
+    """Drop a waiting text input so the next message is not read as an answer to it."""
+    _pending_inputs.pop(user_id, None)
 
 
 # --- filters -----------------------------------------------------------------
@@ -363,7 +373,8 @@ def _main_keyboard(stored: StoredProfile, model_label: str = "Модель") -> 
     builder.button(text="🧠 Память", callback_data=_cb("cat", "memory", rev))
     builder.button(text=f"🤖 {model_label}", callback_data=_cb("models", rev))
     builder.button(text="Закрыть", callback_data=_cb("close"))
-    builder.adjust(2, 2, 1)
+    builder.button(text=HOME_LABEL, callback_data="pm:h")
+    builder.adjust(2, 2, 2)
     return builder.as_markup()
 
 
@@ -506,7 +517,7 @@ def _category_screen(
         )
         sizes = (1,)
     builder.button(
-        text="Назад", callback_data=_cb("cat", "behavior", rev) if category == "tools" else _cb("home")
+        text=BACK_LABEL, callback_data=_cb("cat", "behavior", rev) if category == "tools" else _cb("home")
     )
     builder.adjust(*sizes, 1)
     return text, builder.as_markup()
@@ -545,7 +556,7 @@ async def _models_screen(stored: StoredProfile, deps: _ModelDeps) -> tuple[str, 
             "Сейчас каждый запрос считается как один из суточного лимита, и ответы даёт базовая модель. "
             "Выбор моделей станет доступен после включения AI Limits."
         )
-    builder.button(text="Назад", callback_data=_cb("home"))
+    builder.button(text=BACK_LABEL, callback_data=_cb("home"))
     builder.adjust(1)
     return "\n".join(lines).rstrip(), builder.as_markup()
 
@@ -557,7 +568,7 @@ def _presets_keyboard(stored: StoredProfile) -> InlineKeyboardMarkup:
         builder.button(text=marker + title, callback_data=_cb("preset", key, stored.revision))
     marker = "✅ " if stored.profile.character_preset == CUSTOM_PRESET_KEY else ""
     builder.button(text=marker + "Свой вариант", callback_data=_cb("in", "custom", stored.revision))
-    builder.button(text="Назад", callback_data=_cb("home"))
+    builder.button(text=BACK_LABEL, callback_data=_cb("home"))
     builder.adjust(1)
     return builder.as_markup()
 
@@ -641,6 +652,8 @@ async def ai_settings_callback(
     action, args = (parts[1] if len(parts) > 1 else ""), parts[2:]
     repo = PersonalAiRepository(db_session)
     user_id = query.from_user.id
+    # Opening any Personal AI button abandons a waiting private-panel prompt from /start.
+    _reset_home_pending(user_id)
     deps = _model_deps(settings, session_factory, personal_config, llm_client, web_search_client)
 
     if action == "close":

@@ -19,7 +19,7 @@ from uuid import UUID, uuid4
 import httpx
 from aiogram import Bot, F, Router
 from aiogram.dispatcher.event.bases import SkipHandler
-from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (
     BufferedInputFile,
@@ -1430,16 +1430,30 @@ _INLINE_PM_PENDING: dict[str, _InlinePrivatePendingMessage] = {}
 _INLINE_RP_PENDING: dict[str, tuple[int, UserSnapshot, datetime]] = {}
 _INLINE_RP_RECENT_TARGETS: dict[int, list[UserSnapshot]] = {}
 _GACHA_CALLBACK_PREFIX = "gacha:"
+# Mirrors PAID_PULL_PRICE in gacha/src/gacha_service/application/service.py; the gacha API
+# does not expose it, so change both together.
 _GACHA_PAID_PULL_PRICE = 160
 _GACHA_CURRENCY_PURCHASE_AMOUNT = GACHA_DEFAULT_CURRENCY_PURCHASE_AMOUNT
 _GACHA_COIN_EXCHANGE_RATE = GACHA_CURRENCY_PER_COIN_RATE
 _GACHA_SUBSCRIPTION_CHANNEL = "@SelaraBot_Chanel"
 _GACHA_SUBSCRIPTION_CHANNEL_URL = "https://t.me/SelaraBot_Chanel"
+_GACHA_SUBSCRIPTION_PROMPT_HTML = (
+    f'Для использования гачи нужно подписаться на наш канал: '
+    f'<a href="{_GACHA_SUBSCRIPTION_CHANNEL_URL}">SelaraBot Chanel</a>'
+)
 _GACHA_SUBSCRIPTION_CACHE_TTL = 600
 _gacha_subscription_cache: dict[int, tuple[bool, float]] = {}
+# The subscribe link is posted in the chat after an alert, at most once per chat and user in this window.
+_GACHA_SUBSCRIPTION_PROMPT_COOLDOWN = 300
+_gacha_subscription_prompt_sent_at: dict[tuple[int, int], float] = {}
 _GACHA_BANNER_LABELS: dict[str, str] = {
     "genshin": "Геншин",
     "hsr": "HSR",
+}
+# Text command that runs the free pull (server-side cooldown per banner) for each banner.
+_GACHA_FREE_PULL_COMMANDS: dict[str, str] = {
+    "genshin": "гача генш",
+    "hsr": "гача хср",
 }
 _GACHA_CUSTOM_EMOJI_CATALOG_PATH = Path(__file__).resolve().parents[1] / "gacha_custom_emojis.json"
 _GACHA_GENSHIN_EMOJI_KEYS_BY_TEXT: tuple[tuple[str, str], ...] = (
@@ -2054,9 +2068,10 @@ def _gacha_currency_label(banner: str) -> str:
 
 
 def _gacha_currency_button_label(banner: str) -> str:
+    coin_price = _GACHA_CURRENCY_PURCHASE_AMOUNT * _GACHA_COIN_EXCHANGE_RATE
     if (banner or "").strip().lower() == "hsr":
-        return f"+{_GACHA_CURRENCY_PURCHASE_AMOUNT} нефрита"
-    return f"+{_GACHA_CURRENCY_PURCHASE_AMOUNT} примогемов"
+        return f"+{_GACHA_CURRENCY_PURCHASE_AMOUNT} нефрита за {coin_price} монет"
+    return f"+{_GACHA_CURRENCY_PURCHASE_AMOUNT} примогемов за {coin_price} монет"
 
 
 def _gacha_rank_label(banner: str) -> str:
@@ -2151,6 +2166,15 @@ def _gacha_economy_mode(*, chat_type: str, chat_settings: ChatSettings) -> str:
     return "global"
 
 
+def _gacha_coin_payment_context(*, economy_mode: str, chat_id: int | None) -> str:
+    """Explain *which* bot coin balance pays for banner currency in this UI."""
+    if chat_id is not None and economy_mode == "local":
+        return "🪙 Покупка валюты списывает монеты <b>этой группы</b> (локальная экономика)."
+    if chat_id is not None:
+        return "🪙 Покупка валюты списывает <b>общий баланс монет</b> (глобальная экономика группы)."
+    return "🪙 Покупка валюты списывает <b>общий баланс монет</b> (личный чат)."
+
+
 def _gacha_economy_chat_id(*, chat_type: str, chat_id: int) -> int | None:
     if chat_type in {"group", "supergroup"}:
         return chat_id
@@ -2181,12 +2205,29 @@ async def _require_channel_subscription(bot: Bot, message: Message, user_id: int
     if await _is_subscribed_to_channel(bot, user_id):
         return True
     await message.answer(
-        f'Для использования гачи нужно подписаться на наш канал: '
-        f'<a href="{_GACHA_SUBSCRIPTION_CHANNEL_URL}">SelaraBot Chanel</a>',
+        _GACHA_SUBSCRIPTION_PROMPT_HTML,
         parse_mode="HTML",
         disable_web_page_preview=True,
     )
     return False
+
+
+def _gacha_subscription_prompt_is_due(*, chat_id: int, user_id: int) -> bool:
+    last_sent_at = _gacha_subscription_prompt_sent_at.get((chat_id, user_id))
+    return last_sent_at is None or time.monotonic() - last_sent_at >= _GACHA_SUBSCRIPTION_PROMPT_COOLDOWN
+
+
+def _mark_gacha_subscription_prompt_sent(*, chat_id: int, user_id: int) -> None:
+    now = time.monotonic()
+    # Drop expired entries so the process-wide dict stays bounded by the cooldown window.
+    expired = [
+        key
+        for key, sent_at in _gacha_subscription_prompt_sent_at.items()
+        if now - sent_at >= _GACHA_SUBSCRIPTION_PROMPT_COOLDOWN
+    ]
+    for key in expired:
+        del _gacha_subscription_prompt_sent_at[key]
+    _gacha_subscription_prompt_sent_at[(chat_id, user_id)] = now
 
 
 async def _require_channel_subscription_callback(bot: Bot, query: CallbackQuery, user_id: int, activity_repo=None) -> bool:
@@ -2198,6 +2239,24 @@ async def _require_channel_subscription_callback(bot: Bot, query: CallbackQuery,
         f"Для гачи нужно подписаться на канал {_GACHA_SUBSCRIPTION_CHANNEL}",
         show_alert=True,
     )
+    # Alerts cannot hold a tappable link, so the subscribe path is posted in the chat as well,
+    # but not on every repeated tap.
+    # InaccessibleMessage has no answer() method. The alert above already
+    # explains the restriction, so the optional link is best-effort.
+    if query.message is not None and callable(getattr(query.message, "answer", None)):
+        chat_id = query.message.chat.id
+        if _gacha_subscription_prompt_is_due(chat_id=chat_id, user_id=user_id):
+            try:
+                await query.message.answer(
+                    _GACHA_SUBSCRIPTION_PROMPT_HTML,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+            except (TelegramBadRequest, TelegramForbiddenError):
+                logger.debug("Gacha subscription link could not be posted", exc_info=True)
+            else:
+                # Failed sends must not suppress the next eligible tap.
+                _mark_gacha_subscription_prompt_sent(chat_id=chat_id, user_id=user_id)
     return False
 
 
@@ -2292,12 +2351,18 @@ def _parse_gacha_callback_data(data: str | None) -> tuple[str | None, str | None
     return None, None, None, None, None
 
 
-def _build_gacha_sell_markup(*, banner: str, pull_id: int, owner_user_id: int) -> InlineKeyboardMarkup:
+def _build_gacha_sell_markup(
+    *, banner: str, pull_id: int, owner_user_id: int, sale_price: int | None = None
+) -> InlineKeyboardMarkup:
+    # The price is shown on the button so the irreversible sale is visible before the tap.
+    sell_text = "Продать"
+    if sale_price is not None:
+        sell_text = f"Продать за {_format_gacha_number(sale_price)} валюты"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Продать",
+                    text=sell_text,
                     callback_data=_gacha_sell_callback_data(banner=banner, pull_id=pull_id, owner_user_id=owner_user_id),
                 )
             ]
@@ -2328,13 +2393,18 @@ def _build_gacha_info_markup(
             action="currency",
             use_custom_emojis=use_custom_emojis,
         )
+        # Pull and currency purchase live on separate rows so a tap on one never lands on the other.
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"Крутка • {_gacha_banner_label(banner)}",
+                    text=f"Крутка • {_gacha_banner_label(banner)} ({_GACHA_PAID_PULL_PRICE} валюты)",
                     callback_data=_gacha_buy_callback_data(banner=banner, owner_user_id=owner_user_id),
                     icon_custom_emoji_id=buy_icon_custom_emoji_id,
                 ),
+            ]
+        )
+        rows.append(
+            [
                 InlineKeyboardButton(
                     text=_gacha_currency_button_label(banner),
                     callback_data=_gacha_currency_buy_callback_data(
@@ -2362,7 +2432,12 @@ def _build_gacha_info_markup(
 def _build_gacha_pull_markup(*, response, banner: str, owner_user_id: int) -> InlineKeyboardMarkup | None:
     if response.sell_offer is None or response.pull_id is None:
         return None
-    return _build_gacha_sell_markup(banner=banner, pull_id=response.pull_id, owner_user_id=owner_user_id)
+    return _build_gacha_sell_markup(
+        banner=banner,
+        pull_id=response.pull_id,
+        owner_user_id=owner_user_id,
+        sale_price=response.sell_offer.sale_price,
+    )
 
 
 def _format_gacha_recent_pull(entry) -> str:
@@ -2400,6 +2475,18 @@ def _render_gacha_info_section(*, banner: str, response, use_custom_emojis: bool
         response=response,
         use_custom_emojis=use_custom_emojis,
     )
+    balance = response.player.total_primogems
+    if response.unique_cards == 0:
+        command = _GACHA_FREE_PULL_COMMANDS.get((banner or "").strip().lower(), "гача")
+        lines.append(
+            f"🆕 Коллекция пока пуста: начните с бесплатной крутки командой «{command}». "
+            "Дубли можно продать кнопкой под результатом."
+        )
+    if balance < _GACHA_PAID_PULL_PRICE:
+        lines.append(
+            f"💡 Платная крутка за {_GACHA_PAID_PULL_PRICE} валюты, у вас <b>{_format_gacha_number(balance)}</b>. "
+            "Бесплатная крутка от валюты не зависит. Пополнить валюту можно кнопкой ниже."
+        )
     lines.append(f"⏱ Последняя: {_format_gacha_recent_pull(recent)}")
     return "\n".join(lines)
 
@@ -2470,7 +2557,17 @@ async def _build_gacha_info_view(
         "<b>🎰 Гача инфо</b>",
         f"🎫 Крутка: <b>{_format_gacha_number(_GACHA_PAID_PULL_PRICE)}</b> валюты",
         f"💱 Курс: <b>1</b> валюта = <b>{_format_gacha_number(_GACHA_COIN_EXCHANGE_RATE)}</b> монет",
+        (
+            f"🆓 Бесплатная крутка: «{_GACHA_FREE_PULL_COMMANDS['genshin']}» или «{_GACHA_FREE_PULL_COMMANDS['hsr']}» "
+            "в чате, раз в кулдаун баннера. Если он ещё идёт, бот напишет, сколько ждать."
+        ),
+        (
+            "🎴 Коллекция: «моя гача генш» или «моя гача хср». Редкость: "
+            "⬜ обычная, 🟦 редкая, 🟪 эпическая, 🟨 легендарная, 🟥 мифическая."
+        ),
+        "📖 Справка по гаче: /help → 🎮 Игры и развлечения → 🎴 Гача Genshin и HSR.",
     ]
+    sections.append(_gacha_coin_payment_context(economy_mode=economy_mode, chat_id=chat_id))
     if coin_balance is not None:
         sections.append(f"🪙 Монеты бота: <b>{_format_gacha_number(coin_balance)}</b>")
     available_banners: list[str] = []
@@ -5432,15 +5529,12 @@ async def _gacha_callback_impl(
             animation_wanted = False
             cache_ready = False
 
-        if animation_wanted:
-            if cache_ready:
-                await _try_send_gacha_pull_animation(
-                    query.message, settings, bot, activity_repo, banner=banner, response=response
-                )
-            else:
-                await _safe_callback_answer(
-                    query, "Гача выполняет подготовку анимаций, попробуйте позже.", show_alert=True
-                )
+        # The pull is already charged at this point, so a cold animation cache must not
+        # tell the user to retry; the classic result below is delivered instead.
+        if animation_wanted and cache_ready:
+            await _try_send_gacha_pull_animation(
+                query.message, settings, bot, activity_repo, banner=banner, response=response
+            )
 
         await _deliver_gacha_pull_response(
             query.message,

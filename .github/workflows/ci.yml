@@ -21,7 +21,7 @@ jobs:
     timeout-minutes: 30
     services:
       redis:
-        image: redis:7-alpine
+        image: mirror.gcr.io/library/redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
         ports:
           - 6379:6379
         options: >-
@@ -30,7 +30,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
       postgres:
-        image: postgres:16-alpine
+        image: mirror.gcr.io/library/postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
         env:
           POSTGRES_DB: selara_test
           POSTGRES_USER: selara_test
@@ -112,7 +112,7 @@ jobs:
         shard: [1, 2, 3, 4]
     services:
       redis:
-        image: redis:7-alpine
+        image: mirror.gcr.io/library/redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
         ports:
           - 6379:6379
         options: >-
@@ -121,7 +121,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
       postgres:
-        image: postgres:16-alpine
+        image: mirror.gcr.io/library/postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
         env:
           POSTGRES_DB: selara_test
           POSTGRES_USER: selara_test
@@ -232,7 +232,7 @@ jobs:
         shard: [1, 2, 3, 4]
     services:
       redis:
-        image: redis:7-alpine
+        image: mirror.gcr.io/library/redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
         ports:
           - 6379:6379
         options: >-
@@ -241,7 +241,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
       postgres:
-        image: postgres:16-alpine
+        image: mirror.gcr.io/library/postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
         env:
           POSTGRES_DB: selara_test
           POSTGRES_USER: selara_test

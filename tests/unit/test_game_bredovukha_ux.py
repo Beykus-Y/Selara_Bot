@@ -49,10 +49,10 @@ def test_private_answers_phase_separates_state_from_action_and_has_no_duplicate_
     game = _bred_game(phase="private_answers", bred_question_prompt="Пропуск ____ тест", bred_current_category="Наука")
     text = game_router._render_game_text(game, _chat_settings())
     assert "<b>Сейчас:</b> сбор ответов в ЛС." in text
-    assert "<b>Что делать:</b> придумайте правдоподобную ложь" in text
+    assert "<b>Что делать:</b> придумайте ЛОЖЬ" in text
     # The action instruction now lives only in the board's "Что делать" line,
     # not duplicated inside the question block underneath it.
-    assert text.count("придумайте правдоподобную ложь") == 1
+    assert text.count("придумайте ЛОЖЬ") == 1
 
 
 def test_public_vote_phase_separates_state_from_action() -> None:

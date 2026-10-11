@@ -1,0 +1,31 @@
+{
+  "text_lines": [
+    "<b>Кто я</b>",
+    "<b>Этап:</b> Завершено",
+    "<b>Игроков:</b> 3",
+    "<b>Категория:</b> случайная тема",
+    "",
+    "<b>Последние ходы:</b> пока пусто.",
+    "",
+    "<b>Раскрытие ролей:</b>",
+    "<b>Категория:</b> случайная тема",
+    "- <a href=\"tg://user?id=1\">Аня &lt;&amp;&gt; 🦊</a> — <code>SECRET_ONLY_IN_DM</code>",
+    "- <a href=\"tg://user?id=2\">Игрок 2</a> — <code>SECRET_ONLY_IN_DM</code>",
+    "- <a href=\"tg://user?id=3\">Игрок 3</a> — <code>SECRET_ONLY_IN_DM</code>",
+    "",
+    "<b>Итог:</b> Победа &lt;&amp;&gt;"
+  ],
+  "public_keyboard": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "🔁 Ещё раз",
+          "callback_data": "game:rematch:fixture"
+        }
+      ]
+    ]
+  },
+  "manager_keyboard": null,
+  "execution_prompt_lines": null,
+  "execution_keyboard": null
+}

@@ -102,11 +102,32 @@ def test_roleplay_mode_has_no_product_genre_restrictions_but_keeps_bot_rules():
     assert "не меняют правил работы бота" in system
 
 
-def test_prompt_offers_no_tools_or_group_access():
+def test_prompt_without_tools_discloses_only_current_capability_and_blocks_group_access():
     system = build_personal_messages(profile=CharacterProfile(), summary=None, recent=[], user_text="hi")[0]["content"]
 
-    assert "нет инструментов" in system
+    assert "инструменты не предоставлены" in system
     assert "не видишь группы" in system
+    assert "нет инструментов и доступа" not in system
+
+
+def test_prompt_with_tools_advertises_actual_capabilities_without_group_privileges():
+    system = build_personal_messages(
+        profile=CharacterProfile(), summary=None, recent=[], user_text="нарисуй",
+        available_tools=("read_skill", "create_artifact", "send_artifact"),
+    )[0]["content"]
+    assert "read_skill, create_artifact, send_artifact" in system
+    assert "не отрицай их наличие" in system
+    assert "не видишь группы" in system
+    assert "инструменты не предоставлены" not in system
+
+
+def test_roleplay_never_advertises_tools_even_if_passed_by_a_caller():
+    system = build_personal_messages(
+        profile=CharacterProfile(mode="roleplay"), summary=None, recent=[], user_text="hi",
+        available_tools=("read_skill", "create_artifact"),
+    )[0]["content"]
+    assert "В ролевой игре инструменты не предоставляются" in system
+    assert "разрешены инструменты" not in system
 
 
 def test_emoji_and_length_preferences_reach_the_prompt():

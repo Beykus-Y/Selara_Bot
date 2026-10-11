@@ -3,7 +3,7 @@ import asyncio
 import copy
 import json
 
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, expect
 
 from test_miniapp_selara_ai_browser import (
     PREVIEW_URL, SESSION, READINESS, WIDTHS, _new_page, _overflow_free, _start_preview, _ai_summary, _monetization,
@@ -178,6 +178,14 @@ async def scenario(browser, width):
     assert state["writes"][-1] == {"quota_mode": "ail", "free_daily_ail": 10, "paid_daily_ail": 100, "confirm": True}
     assert "×2.5 AIL" in await quota.inner_text()
     await _overflow_free(page, f"quota mode {width}")
+
+    # A new server snapshot resets existing drafts without losing the active mode.
+    await quota.get_by_label("Free AIL / сутки", exact=True).fill("999")
+    state["quota"].update(free_daily_ail=25, paid_daily_ail=250)
+    await quota.get_by_role("button", name="Повторить", exact=True).click()
+    await expect(quota.get_by_label("Free AIL / сутки", exact=True)).to_have_value("25")
+    await expect(quota.get_by_label("Personal AIL / сутки", exact=True)).to_have_value("250")
+    await expect(quota.get_by_label("AI Limits", exact=True)).to_be_checked()
 
     # Reload with an empty catalog, then a delayed catalog read.
     state["models"] = []
