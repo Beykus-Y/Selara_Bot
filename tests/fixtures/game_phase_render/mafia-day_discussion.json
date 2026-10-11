@@ -35,7 +35,7 @@
       [
         {
           "text": "🗳 Открыть голосование",
-          "callback_data": "game:adv:fixture:day_discussion:2"
+          "callback_data": "game:adv:fixture:day_discussion:2:0"
         }
       ],
       [
