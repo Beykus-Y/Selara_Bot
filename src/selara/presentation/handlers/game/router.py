@@ -3044,12 +3044,24 @@ async def restore_phase_timers(bot: Bot, session_factory: Any) -> None:
                 )
 
                 # Re-check the snapshot before cancelling another phase's timer.
-                _schedule_phase_timer_with_remaining(
-                    bot, game, chat_settings, remaining,
-                    expected_phase_version=expected_phase_version,
+                _schedule_phase_timer_with_remaining_if_current(
+                    bot, game, chat_settings, remaining, expected_phase_version,
                 )
             except Exception:
                 logger.exception("Failed to restore timer for game %s", game.game_id)
+
+
+def _schedule_phase_timer_with_remaining_if_current(
+    bot: Bot,
+    game: GroupGame,
+    chat_settings: ChatSettings,
+    remaining_seconds: float,
+    expected_phase_version: tuple[str | None, str | None, int | None, datetime | None],
+) -> None:
+    """Do not replace a newer timer after restore awaited chat settings."""
+    if _timer_phase_version(game) != expected_phase_version:
+        return
+    _schedule_phase_timer_with_remaining(bot, game, chat_settings, remaining_seconds)
 
 
 def _schedule_phase_timer_with_remaining(
