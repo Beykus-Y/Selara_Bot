@@ -3813,6 +3813,7 @@ async def _resolve_zlob_round(
     expected_round_no: int | None = None,
 ) -> tuple[GroupGame | None, str | None]:
     transition = await GAME_STORE.zlob_resolve_round(game_id=game_id, force=force, expected_round_no=expected_round_no)
+    game, resolution, error = transition
     if game is None:
         return None, "Игра не найдена"
     if error:
@@ -3849,7 +3850,6 @@ async def _resolve_zlob_round(
         chat_settings,
         note="\n".join(note_parts),
     )
-    game, resolution, error = transition
     _schedule_phase_timer_if_current(bot, game, chat_settings, timer_phase_version)
     if triggered_by_auto:
         logger.debug("Zlobcards round resolved automatically", extra={"game_id": game.game_id})
