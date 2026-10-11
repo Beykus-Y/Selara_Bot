@@ -56,7 +56,7 @@
       [
         {
           "text": "🎲 Случайная тема",
-          "callback_data": "game:adv:fixture:category_pick:2"
+          "callback_data": "game:adv:fixture:category_pick:2:0"
         }
       ],
       [
