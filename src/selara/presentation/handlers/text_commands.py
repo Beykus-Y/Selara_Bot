@@ -19,7 +19,7 @@ from uuid import UUID, uuid4
 import httpx
 from aiogram import Bot, F, Router
 from aiogram.dispatcher.event.bases import SkipHandler
-from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (
     BufferedInputFile,
@@ -2241,16 +2241,22 @@ async def _require_channel_subscription_callback(bot: Bot, query: CallbackQuery,
     )
     # Alerts cannot hold a tappable link, so the subscribe path is posted in the chat as well,
     # but not on every repeated tap.
-    if query.message is not None:
+    # InaccessibleMessage has no answer() method. The alert above already
+    # explains the restriction, so the optional link is best-effort.
+    if query.message is not None and callable(getattr(query.message, "answer", None)):
         chat_id = query.message.chat.id
         if _gacha_subscription_prompt_is_due(chat_id=chat_id, user_id=user_id):
-            await query.message.answer(
-                _GACHA_SUBSCRIPTION_PROMPT_HTML,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-            # Recorded only after a successful send, so a failed send does not suppress the next tap.
-            _mark_gacha_subscription_prompt_sent(chat_id=chat_id, user_id=user_id)
+            try:
+                await query.message.answer(
+                    _GACHA_SUBSCRIPTION_PROMPT_HTML,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+            except (TelegramBadRequest, TelegramForbiddenError):
+                log.debug("Gacha subscription link could not be posted", exc_info=True)
+            else:
+                # Failed sends must not suppress the next eligible tap.
+                _mark_gacha_subscription_prompt_sent(chat_id=chat_id, user_id=user_id)
     return False
 
 
