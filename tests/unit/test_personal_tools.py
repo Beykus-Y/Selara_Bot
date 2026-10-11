@@ -574,6 +574,7 @@ async def test_fake_artifact_created_claim_is_not_presented_as_success_without_t
     "создай изображение попугая",
     "сделай схему работы чата",
     "нарисуй рисунок",
+    "Нарисуй схему кода авторизации",
 ])
 async def test_svg_code_dump_for_picture_request_is_corrected(prompt: str):
     llm = ScriptedLlm(
@@ -599,6 +600,8 @@ async def test_svg_code_dump_for_picture_request_is_corrected(prompt: str):
     "Выведи SVG-разметку схемы",
     "Сделай схему и выведи её кодом",
     "Напиши код изображения",
+    "Покажи изображение как разметку SVG",
+    "Выведи разметку SVG схемы",
 ])
 async def test_explicit_svg_code_request_is_not_forced_into_artifact(prompt: str):
     llm = ScriptedLlm(_response(content='<svg><circle r="40"/></svg>'))
@@ -655,3 +658,25 @@ async def test_get_artifact_explanations_do_not_trigger_retries(reply: str):
     )
     assert len(llm.calls) == 1
     assert turn.text == reply
+
+
+
+@pytest.mark.parametrize("promise", [
+    "Сейчас я попробую вызвать get_artifact для чтения исходника.",
+    "Сейчас я собираюсь вызвать get_artifact.",
+    "Я планирую вызвать read_skill перед редактированием.",
+])
+async def test_first_person_infinitive_tool_plans_are_retryable(promise: str):
+    llm = ScriptedLlm(
+        _response(content=promise),
+        _response(tool_calls=[_tool_call("read_skill", name="artifacts")]),
+        _response(content="Инструкция загружена, файл не отправлен."),
+    )
+    run = _run(web=False, artifacts=True)
+    result = await run_tool_dialogue(
+        llm_client=llm, messages=[{"role": "user", "content": "улучши рисунок"}],
+        run=run,
+    )
+    assert len(llm.calls) == 3
+    assert "artifacts" in run.skills_read
+    assert result.text == "Инструкция загружена, файл не отправлен."
