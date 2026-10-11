@@ -401,6 +401,47 @@ async def test_persona_clear_text_command_removes_persona(monkeypatch: pytest.Mo
     activity_repo.add_audit_log.assert_awaited_once()
     assert "Образ снят" in message.answer.await_args.args[0]
     assert "Аль-Хайтам" in message.answer.await_args.args[0]
+    assert " ← " in message.answer.await_args.args[0]
+    assert message.answer.await_args.kwargs["parse_mode"] == "HTML"
+
+
+@pytest.mark.asyncio
+async def test_persona_clear_success_escapes_html_without_invalid_arrow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = _message()
+    target = UserSnapshot(
+        telegram_user_id=2,
+        username="target",
+        first_name="Target",
+        last_name=None,
+        is_bot=False,
+    )
+    activity_repo = SimpleNamespace(
+        get_chat_persona_label=AsyncMock(return_value='Метка <script> & "образ"'),
+        clear_chat_persona_label=AsyncMock(return_value=True),
+        add_audit_log=AsyncMock(),
+    )
+
+    monkeypatch.setattr(moderation, "_ensure_text_command_access", AsyncMock(return_value=True))
+    monkeypatch.setattr(moderation, "_resolve_target_user", AsyncMock(return_value=target))
+    monkeypatch.setattr(moderation, "_target_label", lambda _target: 'Имя <герой> & "роль"')
+
+    await moderation._apply_persona_clear(
+        message=message,
+        activity_repo=activity_repo,
+        target_token="@target",
+    )
+
+    activity_repo.clear_chat_persona_label.assert_awaited_once_with(
+        chat_id=message.chat.id, user_id=target.telegram_user_id
+    )
+    activity_repo.add_audit_log.assert_awaited_once()
+    message.answer.assert_awaited_once_with(
+        'Образ снят: <b>Имя &lt;герой&gt; &amp; &quot;роль&quot;</b> ← '
+        '<code>[Метка &lt;script&gt; &amp; &quot;образ&quot;]</code>',
+        parse_mode="HTML",
+    )
 
 
 @pytest.mark.asyncio
