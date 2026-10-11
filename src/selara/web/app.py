@@ -1671,6 +1671,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
             return None
         if parts[0] == "game" and len(parts) == 3:
             return parts[2]
+        if parts[0] == "game" and len(parts) == 6 and parts[1] == "adv":
+            return parts[2]
         if parts[0] == "game" and len(parts) == 9 and parts[1] == "confirm":
             return parts[3]
         if parts[0] in {
