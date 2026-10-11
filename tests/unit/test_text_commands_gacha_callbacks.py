@@ -952,3 +952,37 @@ async def test_gacha_callback_disabled_chat_never_charges(monkeypatch: pytest.Mo
     exempt_mock.assert_not_awaited()
     subscription_mock.assert_not_awaited()
     assert query.answers == [(None, False)]
+
+@pytest.mark.asyncio
+async def test_gacha_subscription_alert_skips_inaccessible_message(monkeypatch) -> None:
+    query = _DummyQuery(data="gacha:buy:genshin:u1", user_id=1)
+    # Telegram may deliver InaccessibleMessage, which has .chat but no .answer().
+    query.message = SimpleNamespace(chat=SimpleNamespace(id=-100123, type="group"))
+    monkeypatch.setattr(text_commands, "_is_subscribed_to_channel", AsyncMock(return_value=False))
+    text_commands._gacha_subscription_prompt_sent_at.clear()
+
+    allowed = await text_commands._require_channel_subscription_callback(
+        AsyncMock(), query, user_id=1,
+    )
+    assert allowed is False
+    assert query.answers and query.answers[-1][1] is True
+    assert not text_commands._gacha_subscription_prompt_sent_at
+
+
+@pytest.mark.asyncio
+async def test_gacha_subscription_link_failure_does_not_break_alert_or_cooldown(monkeypatch) -> None:
+    query = _DummyQuery(data="gacha:buy:genshin:u1", user_id=1)
+    monkeypatch.setattr(text_commands, "_is_subscribed_to_channel", AsyncMock(return_value=False))
+    text_commands._gacha_subscription_prompt_sent_at.clear()
+
+    async def forbidden_send(*args, **kwargs):
+        raise TelegramBadRequest(method=EditMessageText(text="test", chat_id=-100123, message_id=700),
+                                 message="message to send not found")
+
+    query.message.answer = forbidden_send
+    allowed = await text_commands._require_channel_subscription_callback(
+        AsyncMock(), query, user_id=1,
+    )
+    assert allowed is False
+    assert query.answers and query.answers[-1][1] is True
+    assert not text_commands._gacha_subscription_prompt_sent_at
