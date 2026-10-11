@@ -3590,6 +3590,7 @@ class GameStore:
         self,
         *,
         game_id: str,
+        expected_round_no: int | None = None,
         expected_reveal_cursor: int | None = None,
     ) -> tuple[GroupGame | None, BunkerRevealResult | None, str | None]:
         async with self._lock_game(game_id):
@@ -3600,6 +3601,8 @@ class GameStore:
                 return game, None, "Это не «Бункер»"
             if game.status != "started" or game.phase != "bunker_reveal":
                 return game, None, "Сейчас не этап раскрытия"
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, None, "Раунд уже изменился. Откройте актуальную карточку."
             if expected_reveal_cursor is not None and game.bunker_reveal_cursor != expected_reveal_cursor:
                 return game, None, "Этот ход уже завершён. Откройте актуальную карточку."
 
