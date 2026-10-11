@@ -1413,14 +1413,56 @@ class GameStore:
             game.economy_rewards_granted = True
             return game
 
-    async def set_quiz_feed_message_id(self, *, game_id: str, message_id: int | None) -> GroupGame | None:
+    async def take_quiz_feed_message_id(
+        self,
+        *,
+        game_id: str,
+        expected_question_index: int | None = None,
+        finished_only: bool = False,
+    ) -> tuple[bool, int | None]:
+        """Atomically detach the feed for one active question or a finished quiz.
+
+        The returned flag distinguishes a valid question with no old message
+        from a stale publisher, which must not send anything.
+        """
+        async with self._lock_game(game_id):
+            game = self._by_id.get(game_id)
+            if game is None or game.kind != "quiz":
+                return False, None
+            if finished_only:
+                if game.status != "finished":
+                    return False, None
+            elif (
+                game.status != "started"
+                or game.phase != "freeplay"
+                or game.quiz_current_question_index != expected_question_index
+            ):
+                return False, None
+            message_id = game.quiz_feed_message_id
+            game.quiz_feed_message_id = None
+            return True, message_id
+
+    async def set_quiz_feed_message_id(
+        self,
+        *,
+        game_id: str,
+        message_id: int | None,
+        expected_question_index: int | None = None,
+    ) -> GroupGame | None:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None
-            # A send can complete after another worker stopped the quiz.
-            # Never register a new live-question message on a finished game;
-            # the caller must delete the just-sent message when None is returned.
+            # Late Telegram sends must not replace a newer question's feed.
+            # A caller providing an expected index is fenced under this lock,
+            # not against an unlocked snapshot.
+            if expected_question_index is not None and (
+                game.kind != "quiz"
+                or game.status != "started"
+                or game.phase != "freeplay"
+                or game.quiz_current_question_index != expected_question_index
+            ):
+                return None
             if message_id is not None and (game.kind != "quiz" or game.status != "started"):
                 return None
             game.quiz_feed_message_id = message_id
@@ -6101,6 +6143,31 @@ def _event_type_for_method(name: str) -> str:
     return "game_updated"
 
 
+_PHASE_SNAPSHOT_METHODS = frozenset({
+    "start",
+    "mafia_resolve_night",
+    "mafia_open_day_vote",
+    "mafia_resolve_day_vote",
+    "mafia_resolve_execution_confirm",
+    "zlob_open_vote",
+    "zlob_resolve_round",
+    "zlob_submit_cards",
+})
+
+
+class _PhaseVersionedResult(tuple):
+    """Preserve normal tuple unpacking, plus a frozen version from before Redis I/O."""
+
+    def __new__(
+        cls,
+        result: tuple,
+        phase_version: tuple[str, str, int, datetime | None],
+    ) -> _PhaseVersionedResult:
+        instance = super().__new__(cls, result)
+        instance.phase_version = phase_version
+        return instance
+
+
 class _RecoverySupersededError(Exception):
     """A recovery attempt lost ownership of its candidate Redis runtime."""
 
@@ -7039,6 +7106,20 @@ class RuntimeGameStore:
             token = _TOUCHED_GAME_IDS.set(touched)
             try:
                 result = await attr(*args, **kwargs)
+                # Capture a phase version BEFORE Redis persistence yields. The
+                # returned GroupGame itself is a shared mutable object; after
+                # sync another callback may already have advanced its phase.
+                if (
+                    name in _PHASE_SNAPSHOT_METHODS
+                    and isinstance(result, tuple)
+                    and result
+                    and isinstance(result[0], GroupGame)
+                ):
+                    game = result[0]
+                    result = _PhaseVersionedResult(
+                        result,
+                        (game.kind, game.phase, game.round_no, game.phase_started_at),
+                    )
             finally:
                 _TOUCHED_GAME_IDS.reset(token)
             if name not in _READ_ONLY_GAMESTORE_METHODS:
