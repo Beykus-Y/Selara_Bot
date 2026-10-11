@@ -2063,6 +2063,15 @@ def _build_lifecycle_confirmation_keyboard(
     return builder.as_markup()
 
 
+def _manager_advance_step(game: GroupGame) -> int:
+    """Unique step for an admin control within a phase and round."""
+    if game.kind == "bunker" and game.phase == "bunker_reveal":
+        return game.bunker_reveal_cursor
+    if game.kind == "quiz" and game.phase == "freeplay":
+        return game.quiz_current_question_index if game.quiz_current_question_index is not None else -1
+    return 0
+
+
 def _build_game_manager_controls(game: GroupGame) -> InlineKeyboardMarkup | None:
     """Separate phase controls from participants' shared action keyboard."""
     if game.status != "started":
@@ -2078,23 +2087,23 @@ def _build_game_manager_controls(game: GroupGame) -> InlineKeyboardMarkup | None
             advance_text = "⚖️ Подвести голоса"
         elif game.phase == "day_execution_confirm":
             advance_text = "☠️ Закрыть казнь"
-        builder.button(text=advance_text, callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}")
+        builder.button(text=advance_text, callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}:{_manager_advance_step(game)}")
     if game.kind == "quiz" and game.phase == "freeplay":
-        builder.button(text="⏭ Закрыть вопрос", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}")
+        builder.button(text="⏭ Закрыть вопрос", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}:{_manager_advance_step(game)}")
     if game.kind == "bredovukha" and game.phase == "category_pick":
-        builder.button(text="🎲 Случайная тема", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}")
+        builder.button(text="🎲 Случайная тема", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}:{_manager_advance_step(game)}")
     if game.kind == "bredovukha" and game.phase == "private_answers":
-        builder.button(text="🗳 Открыть голосование", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}")
+        builder.button(text="🗳 Открыть голосование", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}:{_manager_advance_step(game)}")
     if game.kind == "bredovukha" and game.phase == "public_vote":
-        builder.button(text="📣 Закрыть раунд", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}")
+        builder.button(text="📣 Закрыть раунд", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}:{_manager_advance_step(game)}")
     if game.kind == "zlobcards" and game.phase == "private_answers":
-        builder.button(text="🗳 Открыть голосование", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}")
+        builder.button(text="🗳 Открыть голосование", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}:{_manager_advance_step(game)}")
     if game.kind == "zlobcards" and game.phase == "public_vote":
-        builder.button(text="📣 Закрыть раунд", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}")
+        builder.button(text="📣 Закрыть раунд", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}:{_manager_advance_step(game)}")
     if game.kind == "bunker" and game.phase == "bunker_reveal":
-        builder.button(text="⏭ Пропустить ход", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}")
+        builder.button(text="⏭ Пропустить ход", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}:{_manager_advance_step(game)}")
     if game.kind == "bunker" and game.phase == "bunker_vote":
-        builder.button(text="⏭ Завершить голосование", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}")
+        builder.button(text="⏭ Завершить голосование", callback_data=f"game:adv:{game.game_id}:{game.phase}:{game.round_no}:{_manager_advance_step(game)}")
 
     if game.kind == "spy" and game.phase == "freeplay":
         builder.button(text="🔎 Раскрыть роли", callback_data=f"game:reveal:{game.game_id}")
@@ -3547,8 +3556,11 @@ async def _resolve_quiz_round(
     *,
     force: bool,
     triggered_by_auto: bool,
+    expected_question_index: int | None = None,
 ) -> tuple[GroupGame | None, str | None]:
-    game, resolution, error = await GAME_STORE.quiz_resolve_round(game_id=game_id, force=force)
+    game, resolution, error = await GAME_STORE.quiz_resolve_round(
+        game_id=game_id, force=force, expected_question_index=expected_question_index,
+    )
     if game is None:
         return None, "Игра не найдена"
     if error:
@@ -4529,9 +4541,9 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
         return
 
     _, action, game_id = parts[:3]
-    confirmation = parts[3:] if len(parts) == 6 else None
-    versioned_advance = len(parts) == 5 and action == "adv"
-    if len(parts) == 5 and not versioned_advance:
+    confirmation = parts[3:] if len(parts) == 6 and action in {"sok", "rok", "back"} else None
+    versioned_advance = len(parts) == 6 and action == "adv"
+    if len(parts) == 5 or (len(parts) == 6 and not (versioned_advance or confirmation is not None)):
         await query.answer("Некорректные параметры", show_alert=False)
         return
     if confirmation is not None and action not in {"sok", "rok", "back"}:
@@ -4556,12 +4568,14 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
         return
 
     if versioned_advance:
-        expected_phase, expected_round_raw = parts[3:]
+        expected_phase, expected_round_raw, expected_step_raw = parts[3:]
         if (
             not expected_round_raw.isdecimal()
+            or not expected_step_raw.isdecimal()
             or game.status != "started"
             or game.phase != expected_phase
             or game.round_no != int(expected_round_raw)
+            or _manager_advance_step(game) != int(expected_step_raw)
         ):
             await query.answer("Фаза игры изменилась. Найдите текущую доску через /gameboard.", show_alert=True)
             return
@@ -4867,6 +4881,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
                 economy_repo=economy_repo,
                 force=True,
                 triggered_by_auto=False,
+                expected_question_index=int(parts[5]) if versioned_advance else None,
             )
             if error:
                 await query.answer(error, show_alert=False)
@@ -4982,7 +4997,11 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
 
         if game.kind == "bunker":
             if game.phase == "bunker_reveal":
-                updated_game, result, error = await GAME_STORE.bunker_force_advance_reveal(game_id=game.game_id)
+                updated_game, result, error = await GAME_STORE.bunker_force_advance_reveal(
+                    game_id=game.game_id,
+                    expected_round_no=int(parts[4]) if versioned_advance else None,
+                    expected_reveal_cursor=int(parts[5]) if versioned_advance else None,
+                )
                 if updated_game is None:
                     await query.answer("Игра не найдена", show_alert=False)
                     return

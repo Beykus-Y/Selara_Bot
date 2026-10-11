@@ -227,3 +227,71 @@ def test_mafia_private_day_vote_does_not_offer_self_or_immune_player() -> None:
     markup = ui._build_private_day_vote_keyboard(game, actor_user_id=1)
     assert markup is not None
     assert callbacks(markup) == ["gmvote:g1011:3:2"]
+
+@pytest.mark.asyncio
+async def test_bunker_manager_advance_fences_replayed_and_concurrent_clicks() -> None:
+    import asyncio
+
+    game = active("bunker", "bunker_reveal", round_no=2)
+    game.bunker_round_reveal_user_ids = [1, 2, 3]
+    game.bunker_current_actor_user_id = 1
+    game.bunker_reveal_cursor = 0
+    store = put(game)
+
+    controls = ui._build_game_manager_controls(game)
+    advance = next(value for value in callbacks(controls) if value.startswith("game:adv:"))
+    assert advance == "game:adv:g1011:bunker_reveal:2:0"
+    assert len(advance.encode()) <= 64
+
+    results = await asyncio.gather(*(
+        store.bunker_force_advance_reveal(
+            game_id=game.game_id, expected_round_no=2, expected_reveal_cursor=0,
+        )
+        for _ in range(3)
+    ))
+    assert sum(error is None for _, _, error in results) == 1
+    assert game.bunker_reveal_cursor == 1
+    assert game.bunker_current_actor_user_id == 2
+    assert all(result is None for _, result, error in results if error is not None)
+
+    new_advance = next(
+        value for value in callbacks(ui._build_game_manager_controls(game))
+        if value.startswith("game:adv:")
+    )
+    assert new_advance == "game:adv:g1011:bunker_reveal:2:1"
+    _, result, failure = await store.bunker_force_advance_reveal(
+        game_id=game.game_id, expected_round_no=1, expected_reveal_cursor=1,
+    )
+    assert result is None and failure is not None
+    assert game.bunker_reveal_cursor == 1
+
+
+@pytest.mark.asyncio
+async def test_quiz_manager_advance_fences_duplicate_question_resolution() -> None:
+    import asyncio
+
+    store = GameStore()
+    game, error = await store.create_lobby(
+        kind="quiz", chat_id=-999, chat_title="Quiz",
+        owner_user_id=1, owner_label="Alice", reveal_eliminated_role=True,
+    )
+    assert error is None and game is not None
+    await store.join(game_id=game.game_id, user_id=2, user_label="Bob")
+    game, error = await store.start(game_id=game.game_id)
+    assert error is None and game is not None
+    assert game.quiz_current_question_index == 0
+
+    token = next(
+        value for value in callbacks(ui._build_game_manager_controls(game))
+        if value.startswith("game:adv:")
+    )
+    assert token.endswith(":freeplay:1:0")
+
+    outcomes = await asyncio.gather(*(
+        store.quiz_resolve_round(
+            game_id=game.game_id, force=True, expected_question_index=0,
+        )
+        for _ in range(2)
+    ))
+    assert sum(error is None for _, _, error in outcomes) == 1
+    assert game.quiz_current_question_index == 1

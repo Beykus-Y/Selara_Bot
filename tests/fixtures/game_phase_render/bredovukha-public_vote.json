@@ -65,7 +65,7 @@
       [
         {
           "text": "📣 Закрыть раунд",
-          "callback_data": "game:adv:fixture:public_vote:2"
+          "callback_data": "game:adv:fixture:public_vote:2:0"
         }
       ],
       [

@@ -140,7 +140,7 @@ def test_admin_control_callbacks_have_phase_version_and_fit_telegram_limit():
     markup = game_router._build_game_manager_controls(game)
     assert markup is not None
     items = callbacks(markup)
-    assert "game:adv:1234567890:day_execution_confirm:99" in items
+    assert "game:adv:1234567890:day_execution_confirm:99:0" in items
     confirm = game_router._build_lifecycle_confirmation_keyboard(
         game=game, action="stop", issued_at=1799999999,
     )

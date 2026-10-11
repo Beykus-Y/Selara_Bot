@@ -47,7 +47,7 @@
       [
         {
           "text": "⏭ Пропустить ход",
-          "callback_data": "game:adv:fixture:bunker_reveal:2"
+          "callback_data": "game:adv:fixture:bunker_reveal:2:0"
         }
       ],
       [
