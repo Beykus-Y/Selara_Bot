@@ -4999,6 +4999,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             if game.phase == "bunker_reveal":
                 updated_game, result, error = await GAME_STORE.bunker_force_advance_reveal(
                     game_id=game.game_id,
+                    expected_round_no=int(parts[4]) if versioned_advance else None,
                     expected_reveal_cursor=int(parts[5]) if versioned_advance else None,
                 )
                 if updated_game is None:
