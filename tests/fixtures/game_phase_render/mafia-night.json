@@ -39,7 +39,7 @@
       [
         {
           "text": "🌅 Завершить ночь",
-          "callback_data": "game:adv:fixture:night:2"
+          "callback_data": "game:adv:fixture:night:2:0"
         }
       ],
       [
