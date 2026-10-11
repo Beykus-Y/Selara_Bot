@@ -925,7 +925,7 @@ async def _apply_persona_clear(
         meta_json={"persona_label": current_label},
     )
     await message.answer(
-        f"Образ снят: <b>{escape(_target_label(target))}</b> <- <code>[{escape(current_label)}]</code>",
+        f"Образ снят: <b>{escape(_target_label(target))}</b> ← <code>[{escape(current_label)}]</code>",
         parse_mode="HTML",
     )
 
