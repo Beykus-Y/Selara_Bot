@@ -2360,6 +2360,18 @@ async def _sync_quiz_feed_message(
     if question_no is None:
         return
 
+    # RuntimeGameStore may await Redis after the atomic feed take. A fresh
+    # read right before publishing rejects a question superseded during that
+    # persistence or during deletion of the prior Telegram message.
+    current = await GAME_STORE.get_game(game.game_id)
+    if (
+        current is None
+        or current.status != "started"
+        or current.phase != "freeplay"
+        or current.quiz_current_question_index != question_index
+    ):
+        return
+
     kwargs: dict[str, object] = {
         "chat_id": game.chat_id,
         "text": build_quiz_start_text(question_no=question_no),
@@ -2775,6 +2787,14 @@ def _timer_phase_version(game: GroupGame) -> tuple[str | None, str | None, int |
         getattr(game, "round_no", None),
         getattr(game, "phase_started_at", None),
     )
+
+
+def _phase_version_from_transition(
+    transition: tuple,
+    game: GroupGame,
+) -> tuple[str | None, str | None, int | None, datetime | None]:
+    """Prefer the frozen snapshot made before RuntimeGameStore syncs Redis."""
+    return getattr(transition, "phase_version", None) or _timer_phase_version(game)
 
 
 def _schedule_phase_timer_if_current(
@@ -3340,14 +3360,15 @@ async def _advance_mafia_night(
     expected_round_no: int | None = None,
     expected_phase_started_at: datetime | None = None,
 ) -> bool:
-    game, resolution, error = await GAME_STORE.mafia_resolve_night(
+    transition = await GAME_STORE.mafia_resolve_night(
         game_id=game_id,
         expected_round_no=expected_round_no,
         expected_phase_started_at=expected_phase_started_at,
     )
+    game, resolution, error = transition
     if game is None or resolution is None or error:
         return False
-    timer_phase_version = _timer_phase_version(game)
+    timer_phase_version = _phase_version_from_transition(transition, game)
 
     note_parts: list[str] = []
     event_parts: list[str] = [f"<b>Ведущий:</b> Ночь {game.round_no} завершена."]
@@ -3418,14 +3439,15 @@ async def _open_mafia_day_vote(
     expected_round_no: int | None = None,
     expected_phase_started_at: datetime | None = None,
 ) -> bool:
-    game, error = await GAME_STORE.mafia_open_day_vote(
+    transition = await GAME_STORE.mafia_open_day_vote(
         game_id=game_id,
         expected_round_no=expected_round_no,
         expected_phase_started_at=expected_phase_started_at,
     )
+    game, error = transition
     if game is None or error:
         return False
-    timer_phase_version = _timer_phase_version(game)
+    timer_phase_version = _phase_version_from_transition(transition, game)
 
     # No group-wide feed event here (games UX audit, Stage 3 correction #5):
     # "voting is open" is pure current state, already shown on the edited
@@ -3454,14 +3476,15 @@ async def _resolve_mafia_day_vote(
     expected_round_no: int | None = None,
     expected_phase_started_at: datetime | None = None,
 ) -> bool:
-    game, resolution, error = await GAME_STORE.mafia_resolve_day_vote(
+    transition = await GAME_STORE.mafia_resolve_day_vote(
         game_id=game_id,
         expected_round_no=expected_round_no,
         expected_phase_started_at=expected_phase_started_at,
     )
+    game, resolution, error = transition
     if game is None or resolution is None or error:
         return False
-    timer_phase_version = _timer_phase_version(game)
+    timer_phase_version = _phase_version_from_transition(transition, game)
 
     protocol_text = _format_day_vote_protocol(game, resolution)
 
@@ -3545,14 +3568,15 @@ async def _resolve_mafia_execution_confirm(
     game_before_resolve = await GAME_STORE.get_game(game_id)
     confirm_message_id = game_before_resolve.execution_confirm_message_id if game_before_resolve else None
 
-    game, resolution, error = await GAME_STORE.mafia_resolve_execution_confirm(
+    transition = await GAME_STORE.mafia_resolve_execution_confirm(
         game_id=game_id,
         expected_round_no=expected_round_no,
         expected_phase_started_at=expected_phase_started_at,
     )
+    game, resolution, error = transition
     if game is None or resolution is None or error:
         return False
-    timer_phase_version = _timer_phase_version(game)
+    timer_phase_version = _phase_version_from_transition(transition, game)
 
     if confirm_message_id is not None:
         try:
@@ -3725,14 +3749,15 @@ async def _open_zlob_vote_phase(
     expected_round_no: int | None = None,
     expected_phase_started_at: datetime | None = None,
 ) -> tuple[GroupGame | None, str | None]:
-    game, error = await GAME_STORE.zlob_open_vote(
+    transition = await GAME_STORE.zlob_open_vote(
         game_id=game_id, force=force,
         expected_round_no=expected_round_no,
         expected_phase_started_at=expected_phase_started_at,
     )
+    game, error = transition
     if game is None:
         return None, "Игра не найдена"
-    timer_phase_version = _timer_phase_version(game)
+    timer_phase_version = _phase_version_from_transition(transition, game)
     if error:
         if (
             triggered_by_auto
@@ -3787,14 +3812,14 @@ async def _resolve_zlob_round(
     triggered_by_auto: bool,
     expected_round_no: int | None = None,
 ) -> tuple[GroupGame | None, str | None]:
-    game, resolution, error = await GAME_STORE.zlob_resolve_round(game_id=game_id, force=force, expected_round_no=expected_round_no)
+    transition = await GAME_STORE.zlob_resolve_round(game_id=game_id, force=force, expected_round_no=expected_round_no)
     if game is None:
         return None, "Игра не найдена"
     if error:
         return game, error
     if resolution is None:
         return game, "Не удалось обработать голосование"
-    timer_phase_version = _timer_phase_version(game)
+    timer_phase_version = _phase_version_from_transition(transition, game)
 
     round_text = _format_zlob_round_resolution(game, resolution)
     if resolution.finished:
@@ -3824,6 +3849,7 @@ async def _resolve_zlob_round(
         chat_settings,
         note="\n".join(note_parts),
     )
+    game, resolution, error = transition
     _schedule_phase_timer_if_current(bot, game, chat_settings, timer_phase_version)
     if triggered_by_auto:
         logger.debug("Zlobcards round resolved automatically", extra={"game_id": game.game_id})
@@ -4885,10 +4911,11 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             await query.answer("Старт может нажать создатель лобби или участник с правом управления играми.", show_alert=True)
             return
 
-        started_game, error = await GAME_STORE.start(
+        transition = await GAME_STORE.start(
             game_id=game_id,
             actions_18_enabled=chat_settings.actions_18_enabled,
         )
+        started_game, error = transition
         if started_game is None:
             await query.answer("Игра не найдена", show_alert=False)
             return
@@ -4896,7 +4923,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             await query.answer(error, show_alert=True)
             return
 
-        started_phase_version = _timer_phase_version(started_game)
+        started_phase_version = _phase_version_from_transition(transition, started_game)
         await _safe_edit_or_send_game_board(bot, started_game, chat_settings)
         await query.answer("Игра началась", show_alert=False)
 
@@ -5811,20 +5838,21 @@ async def zlob_private_submit_callback(query: CallbackQuery, bot: Bot, chat_sett
             return
         selected_indexes = (int(payload),)
 
-    game, result, error = await GAME_STORE.zlob_submit_cards(
+    transition = await GAME_STORE.zlob_submit_cards(
         game_id=game_id,
         user_id=query.from_user.id,
         card_indexes=selected_indexes,
         expected_round_no=expected_round,
         expected_chat_id=current_game.chat_id,
     )
+    game, result, error = transition
     if error:
         await query.answer(error, show_alert=True)
         return
     if game is None or result is None:
         await query.answer("Игра не найдена", show_alert=False)
         return
-    timer_phase_version = _timer_phase_version(game)
+    timer_phase_version = _phase_version_from_transition(transition, game)
     if query.message is not None and query.message.chat.type in {"group", "supergroup"} and query.message.chat.id != game.chat_id:
         await query.answer("Эта кнопка из другого чата", show_alert=False)
         return
