@@ -244,7 +244,9 @@ async def test_bunker_manager_advance_fences_replayed_and_concurrent_clicks() ->
     assert len(advance.encode()) <= 64
 
     results = await asyncio.gather(*(
-        store.bunker_force_advance_reveal(game_id=game.game_id, expected_reveal_cursor=0)
+        store.bunker_force_advance_reveal(
+            game_id=game.game_id, expected_round_no=2, expected_reveal_cursor=0,
+        )
         for _ in range(3)
     ))
     assert sum(error is None for _, _, error in results) == 1
