@@ -65,7 +65,7 @@
       [
         {
           "text": "⏭ Закрыть вопрос",
-          "callback_data": "game:adv:fixture:freeplay:2"
+          "callback_data": "game:adv:fixture:freeplay:2:0"
         }
       ],
       [
