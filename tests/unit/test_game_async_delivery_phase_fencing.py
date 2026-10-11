@@ -181,3 +181,24 @@ async def test_late_zlob_round_handler_cannot_restart_public_vote_timer(monkeypa
         if not old.done():
             await old
         ui._cancel_phase_timer(game.game_id)
+
+
+@pytest.mark.asyncio
+async def test_stale_restore_snapshot_cannot_replace_a_new_mafia_timer():
+    game = _active_game(kind="mafia", phase="day_discussion")
+    old_version = ui._timer_phase_version(game)
+    game.phase = "day_vote"
+    game.phase_started_at = datetime.now(timezone.utc)
+    settings = SimpleNamespace(mafia_vote_seconds=3600)
+    bot = SimpleNamespace()
+    ui._schedule_phase_timer(bot, game, settings)
+    current_timer = ui._GAME_PHASE_TASKS[game.game_id]
+    try:
+        ui._schedule_phase_timer_with_remaining(
+            bot, game, settings, 5,
+            expected_phase_version=old_version,
+        )
+        assert ui._GAME_PHASE_TASKS[game.game_id] is current_timer
+        assert not current_timer.cancelled()
+    finally:
+        ui._cancel_phase_timer(game.game_id)
