@@ -162,3 +162,43 @@ def test_feature_cards_point_at_real_commands_and_nodes() -> None:
     for card in FEATURE_CARDS:
         assert card.spec_key in catalog_keys, f"card references unknown command {card.spec_key!r}"
         assert set(card.related_nodes) <= node_keys, f"{card.spec_key}: unknown related node"
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "game_spy", "game_whoami", "game_mafia", "game_bunker",
+        "game_zlobcards", "game_dice", "game_quiz", "game_bredovukha",
+        "gacha", "couples", "pets", "ai_group", "ai_summary", "subscriptions",
+        "moderation", "admin_settings", "troubleshooting",
+    ],
+)
+def test_core_user_journeys_need_at_most_three_catalog_taps(key: str) -> None:
+    """Issue #184: even deep game instructions stay within three taps of /help."""
+    path = path_to_root(key)
+    assert len(path) - 1 <= 3, f"{key}: too many navigation levels"
+    assert path[-1].key == ROOT_KEY
+    assert path[0].key == key
+
+
+def test_all_catalog_nodes_are_reachable_in_three_taps_and_reversible() -> None:
+    """A new section cannot silently become a buried or one-way screen."""
+    for node in NAV_NODES:
+        path = path_to_root(node.key)
+        assert len(path) <= 4, f"{node.key}: exceeds /help discovery budget"
+        for index in range(len(path) - 1):
+            current, parent = path[index], path[index + 1]
+            assert current.parent == parent.key
+            assert current.key in parent.children
+            assert callback_data_size(nav_callback(current.key)) <= MAX_CALLBACK_DATA_BYTES
+
+
+def test_key_user_capabilities_keep_a_visible_entry_in_the_catalog() -> None:
+    placed = {key for node in NAV_NODES for key in node.spec_keys}
+    # These are confirmed CommandSpec IDs already backed by handlers.
+    required = {
+        "games_lobby", "misc_gacha", "clans_core", "family_adopt_pet_tree",
+        "pets_core", "ai_personal", "ai_daily_summary", "subscriptions_selara",
+        "admin_autocfg", "admin_moderation_actions",
+    }
+    assert required <= placed, f"Missing visible capabilities: {sorted(required - placed)}"
