@@ -4124,6 +4124,9 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     return False, "Старая кнопка управления. Обновите страницу игры."
                 if game.status != "started":
                     return False, "Игра уже завершена."
+                # Snapshot the rendered button version before any awaited handlers.
+                advance_phase = parts[3]
+                advance_round = int(parts[4])
                 if game.kind == "quiz":
                     _, error = await game_router_module._resolve_quiz_round(
                         bot,
@@ -4136,8 +4139,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     )
                     return (error is None), (error or "Вопрос закрыт и обработан.")
                 if game.kind == "bredovukha":
-                    if game.phase == "category_pick":
-                        opened_game, category, error = await GAME_STORE.bred_force_pick_category(game_id=game.game_id)
+                    if advance_phase == "category_pick":
+                        opened_game, category, error = await GAME_STORE.bred_force_pick_category(game_id=game.game_id, expected_round_no=advance_round)
                         if opened_game is None:
                             return False, "Игра не найдена."
                         if error:
@@ -4148,8 +4151,8 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                             note = f"{note}\n<b>ЛС недоступно:</b> {failed_dm} игрок(ов)."
                         await game_router_module._safe_edit_or_send_game_board(bot, opened_game, chat_settings, note=note)
                         return True, "Категория выбрана случайно."
-                    if game.phase == "private_answers":
-                        opened_game, error = await GAME_STORE.bred_open_vote(game_id=game.game_id, force=True)
+                    if advance_phase == "private_answers":
+                        opened_game, error = await GAME_STORE.bred_open_vote(game_id=game.game_id, force=True, expected_round_no=advance_round)
                         if opened_game is None:
                             return False, "Игра не найдена."
                         if error:
@@ -4161,7 +4164,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                             note="<b>Этап:</b> сбор ответов завершён, открыто голосование.",
                         )
                         return True, "Открыто голосование."
-                    if game.phase == "public_vote":
+                    if advance_phase == "public_vote":
                         _, error = await game_router_module._resolve_bred_round(
                             bot,
                             game.game_id,
@@ -4169,14 +4172,15 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                             economy_repo=economy_repo,
                             force=True,
                             triggered_by_auto=False,
+                            expected_round_no=advance_round,
                         )
                         return (error is None), (error or "Голосование завершено.")
                     return False, "Сейчас нет шага для переключения."
                 if game.kind == "bunker":
-                    if game.phase == "bunker_reveal":
+                    if advance_phase == "bunker_reveal":
                         updated_game, result, error = await GAME_STORE.bunker_force_advance_reveal(
                             game_id=game.game_id,
-                            expected_round_no=int(parts[4]),
+                            expected_round_no=advance_round,
                             expected_reveal_cursor=int(parts[5]),
                         )
                         if updated_game is None:
@@ -4192,7 +4196,7 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                             await game_router_module._notify_bunker_reveal_turn(bot, updated_game)
                         await game_router_module._safe_edit_or_send_game_board(bot, updated_game, chat_settings, note=note)
                         return True, "Ход переключён."
-                    if game.phase == "bunker_vote":
+                    if advance_phase == "bunker_vote":
                         _, error = await game_router_module._resolve_bunker_vote(
                             bot,
                             game.game_id,
@@ -4200,22 +4204,24 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                             economy_repo=economy_repo,
                             force=True,
                             triggered_by_auto=False,
+                            expected_round_no=advance_round,
                         )
                         return (error is None), (error or "Голосование завершено.")
                     return False, "Сейчас нет шага для переключения."
                 if game.kind == "zlobcards":
-                    if game.phase == "private_answers":
+                    if advance_phase == "private_answers":
                         opened_game, error = await game_router_module._open_zlob_vote_phase(
                             bot,
                             game.game_id,
                             chat_settings,
                             force=True,
                             triggered_by_auto=False,
+                            expected_round_no=advance_round,
                         )
                         if opened_game is None:
                             return False, "Игра не найдена."
                         return (error is None), (error or "Открыто голосование.")
-                    if game.phase == "public_vote":
+                    if advance_phase == "public_vote":
                         _, error = await game_router_module._resolve_zlob_round(
                             bot,
                             game.game_id,
@@ -4223,50 +4229,51 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                             economy_repo=economy_repo,
                             force=True,
                             triggered_by_auto=False,
+                            expected_round_no=advance_round,
                         )
                         return (error is None), (error or "Раунд обработан.")
                     return False, "Сейчас нет шага для переключения."
                 if game.kind != "mafia":
                     return False, "Авто-переход доступен для мафии, викторины, Бредовухи, Бункера и Злобных Карт."
-                if game.phase == "night":
-                    game_router_module._cancel_phase_timer(game.game_id)
-                    await game_router_module._advance_mafia_night(
+                if advance_phase == "night":
+                    changed = await game_router_module._advance_mafia_night(
                         bot,
                         game.game_id,
                         chat_settings,
                         economy_repo=economy_repo,
                         triggered_by_timer=False,
+                        expected_round_no=advance_round,
                     )
-                    return True, "Ночь завершена."
-                if game.phase == "day_discussion":
-                    game_router_module._cancel_phase_timer(game.game_id)
-                    await game_router_module._open_mafia_day_vote(
+                    return (changed, "Ночь завершена." if changed else "Действие устарело. Обновите страницу игры.")
+                if advance_phase == "day_discussion":
+                    changed = await game_router_module._open_mafia_day_vote(
                         bot,
                         game.game_id,
                         chat_settings,
                         triggered_by_timer=False,
+                        expected_round_no=advance_round,
                     )
-                    return True, "Обсуждение завершено, открыто голосование."
-                if game.phase == "day_vote":
-                    game_router_module._cancel_phase_timer(game.game_id)
-                    await game_router_module._resolve_mafia_day_vote(
-                        bot,
-                        game.game_id,
-                        chat_settings,
-                        economy_repo=economy_repo,
-                        triggered_by_timer=False,
-                    )
-                    return True, "Дневное голосование завершено."
-                if game.phase == "day_execution_confirm":
-                    game_router_module._cancel_phase_timer(game.game_id)
-                    await game_router_module._resolve_mafia_execution_confirm(
+                    return (changed, "Обсуждение завершено, открыто голосование." if changed else "Действие устарело. Обновите страницу игры.")
+                if advance_phase == "day_vote":
+                    changed = await game_router_module._resolve_mafia_day_vote(
                         bot,
                         game.game_id,
                         chat_settings,
                         economy_repo=economy_repo,
                         triggered_by_timer=False,
+                        expected_round_no=advance_round,
                     )
-                    return True, "Подтверждение казни завершено."
+                    return (changed, "Дневное голосование завершено." if changed else "Действие устарело. Обновите страницу игры.")
+                if advance_phase == "day_execution_confirm":
+                    changed = await game_router_module._resolve_mafia_execution_confirm(
+                        bot,
+                        game.game_id,
+                        chat_settings,
+                        economy_repo=economy_repo,
+                        triggered_by_timer=False,
+                        expected_round_no=advance_round,
+                    )
+                    return (changed, "Подтверждение казни завершено." if changed else "Действие устарело. Обновите страницу игры.")
                 return False, "Сейчас нет шага для переключения."
 
             return False, "Неизвестное игровое действие."

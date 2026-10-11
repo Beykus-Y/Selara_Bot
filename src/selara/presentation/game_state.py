@@ -2252,11 +2252,15 @@ class GameStore:
             game.phase_started_at = datetime.now(timezone.utc)
             return game, category, None
 
-    async def bred_force_pick_category(self, *, game_id: str) -> tuple[GroupGame | None, str | None, str | None]:
+    async def bred_force_pick_category(
+        self, *, game_id: str, expected_round_no: int | None = None,
+    ) -> tuple[GroupGame | None, str | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, None, "Действие ведущего устарело. Обновите игровую доску."
             if game.kind != "bredovukha":
                 return game, None, "Это не «Бредовуха»"
             if game.status != "started" or game.phase != "category_pick":
@@ -2944,11 +2948,14 @@ class GameStore:
         *,
         game_id: str,
         force: bool,
+        expected_round_no: int | None = None,
     ) -> tuple[GroupGame | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, "Игра не найдена"
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, "Действие ведущего устарело. Обновите игровую доску."
             if game.kind != "bredovukha":
                 return game, "Это не «Бредовуха»"
             if game.status != "started" or game.phase != "private_answers":
@@ -3030,11 +3037,14 @@ class GameStore:
         *,
         game_id: str,
         force: bool,
+        expected_round_no: int | None = None,
     ) -> tuple[GroupGame | None, BredRoundResolution | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, None, "Действие ведущего устарело. Обновите игровую доску."
             if game.kind != "bredovukha":
                 return game, None, "Это не «Бредовуха»"
             if game.status != "started" or game.phase != "public_vote":
@@ -3374,11 +3384,14 @@ class GameStore:
         *,
         game_id: str,
         force: bool,
+        expected_round_no: int | None = None,
     ) -> tuple[GroupGame | None, ZlobRoundResolution | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, None, "Действие ведущего устарело. Обновите игровую доску."
             if game.kind != "zlobcards":
                 return game, None, "Это не «500 Злобных Карт»"
             if game.status != "started" or game.phase != "public_vote":
@@ -3709,11 +3722,14 @@ class GameStore:
         *,
         game_id: str,
         force: bool,
+        expected_round_no: int | None = None,
     ) -> tuple[GroupGame | None, BunkerVoteResolution | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None, None, "Игра не найдена"
+            if expected_round_no is not None and game.round_no != expected_round_no:
+                return game, None, "Действие ведущего устарело. Обновите игровую доску."
             if game.kind != "bunker":
                 return game, None, "Это не «Бункер»"
             if game.status != "started" or game.phase != "bunker_vote":
