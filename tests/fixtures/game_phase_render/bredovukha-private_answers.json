@@ -48,7 +48,7 @@
       [
         {
           "text": "🗳 Открыть голосование",
-          "callback_data": "game:adv:fixture:private_answers:2"
+          "callback_data": "game:adv:fixture:private_answers:2:0"
         }
       ],
       [
