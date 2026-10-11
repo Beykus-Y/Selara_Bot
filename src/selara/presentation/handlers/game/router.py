@@ -2346,7 +2346,16 @@ async def _sync_quiz_feed_message(bot: Bot, game: GroupGame, *, question_no: int
         kwargs.pop("reply_to_message_id", None)
         sent = await bot.send_message(**kwargs)
 
-    await GAME_STORE.set_quiz_feed_message_id(game_id=game.game_id, message_id=sent.message_id)
+    recorded = await GAME_STORE.set_quiz_feed_message_id(
+        game_id=game.game_id, message_id=sent.message_id,
+    )
+    if recorded is None:
+        # The game finished while Telegram was sending this question.
+        # No live question may remain attached to a finished party.
+        try:
+            await bot.delete_message(chat_id=game.chat_id, message_id=sent.message_id)
+        except (TelegramBadRequest, TelegramForbiddenError):
+            pass
 
 
 def _build_private_phase_keyboard(game: GroupGame, *, actor_user_id: int) -> InlineKeyboardMarkup | None:
