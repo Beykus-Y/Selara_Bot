@@ -1413,14 +1413,56 @@ class GameStore:
             game.economy_rewards_granted = True
             return game
 
-    async def set_quiz_feed_message_id(self, *, game_id: str, message_id: int | None) -> GroupGame | None:
+    async def take_quiz_feed_message_id(
+        self,
+        *,
+        game_id: str,
+        expected_question_index: int | None = None,
+        finished_only: bool = False,
+    ) -> tuple[bool, int | None]:
+        """Atomically detach the feed for one active question or a finished quiz.
+
+        The returned flag distinguishes a valid question with no old message
+        from a stale publisher, which must not send anything.
+        """
+        async with self._lock_game(game_id):
+            game = self._by_id.get(game_id)
+            if game is None or game.kind != "quiz":
+                return False, None
+            if finished_only:
+                if game.status != "finished":
+                    return False, None
+            elif (
+                game.status != "started"
+                or game.phase != "freeplay"
+                or game.quiz_current_question_index != expected_question_index
+            ):
+                return False, None
+            message_id = game.quiz_feed_message_id
+            game.quiz_feed_message_id = None
+            return True, message_id
+
+    async def set_quiz_feed_message_id(
+        self,
+        *,
+        game_id: str,
+        message_id: int | None,
+        expected_question_index: int | None = None,
+    ) -> GroupGame | None:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
             if game is None:
                 return None
-            # A send can complete after another worker stopped the quiz.
-            # Never register a new live-question message on a finished game;
-            # the caller must delete the just-sent message when None is returned.
+            # Late Telegram sends must not replace a newer question's feed.
+            # A caller providing an expected index is fenced under this lock,
+            # not against an unlocked snapshot.
+            if expected_question_index is not None and (
+                game.kind != "quiz"
+                or game.status != "started"
+                or game.phase != "freeplay"
+                or game.quiz_current_question_index != expected_question_index
+            ):
+                return None
             if message_id is not None and (game.kind != "quiz" or game.status != "started"):
                 return None
             game.quiz_feed_message_id = message_id
