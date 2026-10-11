@@ -4054,22 +4054,22 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                     "Игра остановлена ведущим." if confirmed == "stop"
                     else "Игра завершена по решению ведущего."
                 )
-                # finish() clears quiz_feed_message_id on the same game instance.
-                # Preserve it before the atomic transition, but delete only after
-                # finish succeeds so a rejected stale confirmation cannot change
-                # a still-running quiz or its live question message.
-                quiz_feed_message_id = game.quiz_feed_message_id if game.kind == "quiz" else None
+                # Atomically collect the live-question ID before finish()
+                # clears it. The GameStore lock excludes concurrent publication,
+                # while the publisher deletes any question sent after completion.
+                quiz_feed_cleanup_ids: list[int] = []
                 finished_game = await GAME_STORE.finish(
                     game_id=game.game_id,
                     winner_text=winner_text,
                     expected_status="started",
                     expected_phase=game.phase,
                     expected_round_no=game.round_no,
+                    quiz_feed_cleanup_ids=quiz_feed_cleanup_ids,
                 )
                 if finished_game is None:
                     return False, "Партия уже изменилась. Действие не выполнено."
                 game_router_module._cancel_phase_timer(finished_game.game_id)
-                if quiz_feed_message_id is not None:
+                for quiz_feed_message_id in quiz_feed_cleanup_ids:
                     try:
                         await bot.delete_message(
                             chat_id=finished_game.chat_id, message_id=quiz_feed_message_id,
