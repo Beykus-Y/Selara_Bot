@@ -54,7 +54,7 @@
       [
         {
           "text": "⚖️ Подвести голоса",
-          "callback_data": "game:adv:fixture:day_vote:2"
+          "callback_data": "game:adv:fixture:day_vote:2:0"
         }
       ],
       [
