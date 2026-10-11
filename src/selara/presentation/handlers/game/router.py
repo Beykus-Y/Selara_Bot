@@ -2363,13 +2363,16 @@ async def _sync_quiz_feed_message(
     # RuntimeGameStore may await Redis after the atomic feed take. A fresh
     # read right before publishing rejects a question superseded during that
     # persistence or during deletion of the prior Telegram message.
-    current = await GAME_STORE.get_game(game.game_id)
-    if (
-        current is None
-        or current.status != "started"
-        or current.phase != "freeplay"
-        or current.quiz_current_question_index != question_index
-    ):
+    async def question_is_current() -> bool:
+        current = await GAME_STORE.get_game(game.game_id)
+        return bool(
+            current is not None
+            and current.status == "started"
+            and current.phase == "freeplay"
+            and current.quiz_current_question_index == question_index
+        )
+
+    if not await question_is_current():
         return
 
     kwargs: dict[str, object] = {
@@ -2385,6 +2388,10 @@ async def _sync_quiz_feed_message(
         sent = await bot.send_message(**kwargs)
     except TelegramBadRequest:
         kwargs.pop("reply_to_message_id", None)
+        # The failed Telegram call yielded: another callback may have
+        # switched questions before this fallback re-send.
+        if not await question_is_current():
+            return
         sent = await bot.send_message(**kwargs)
 
     recorded = await GAME_STORE.set_quiz_feed_message_id(
@@ -3781,11 +3788,18 @@ async def _open_zlob_vote_phase(
             # A single, restart-safe extension is anchored to the original
             # phase start and never reset by retries or crashes. An out-of-grace
             # game stays actionable for players/manager but never spins timers.
+            # RuntimeGameStore may have awaited Redis after returning the
+            # insufficient-answers error. Never extend a subsequent round.
+            if _timer_phase_version(game) != timer_phase_version:
+                return game, error
             remaining = _zlob_private_grace_remaining(game)
             if remaining > 0:
-                _schedule_phase_timer_with_remaining(
+                _schedule_phase_timer_with_remaining_if_current(
                     bot, game, chat_settings, max(5.0, remaining),
+                    timer_phase_version,
                 )
+            if _timer_phase_version(game) != timer_phase_version:
+                return game, error
             await _safe_edit_or_send_game_board(
                 bot,
                 game,
