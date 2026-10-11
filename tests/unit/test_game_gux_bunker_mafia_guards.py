@@ -259,6 +259,11 @@ async def test_bunker_manager_advance_fences_replayed_and_concurrent_clicks() ->
         if value.startswith("game:adv:")
     )
     assert new_advance == "game:adv:g1011:bunker_reveal:2:1"
+    _, result, failure = await store.bunker_force_advance_reveal(
+        game_id=game.game_id, expected_round_no=1, expected_reveal_cursor=1,
+    )
+    assert result is None and failure is not None
+    assert game.bunker_reveal_cursor == 1
 
 
 @pytest.mark.asyncio
