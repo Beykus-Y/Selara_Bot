@@ -2795,6 +2795,7 @@ class GameStore:
         *,
         game_id: str,
         force: bool,
+        expected_question_index: int | None = None,
     ) -> tuple[GroupGame | None, QuizRoundResolution | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
@@ -2806,6 +2807,8 @@ class GameStore:
                 return game, None, "Сейчас викторина не в активной фазе"
 
             question_index = game.quiz_current_question_index
+            if expected_question_index is not None and question_index != expected_question_index:
+                return game, None, "Этот вопрос уже закрыт. Используйте актуальную доску."
             question = self._current_quiz_question(game)
             if question_index is None or question is None:
                 return game, None, "Текущий вопрос не найден"
@@ -3587,6 +3590,7 @@ class GameStore:
         self,
         *,
         game_id: str,
+        expected_reveal_cursor: int | None = None,
     ) -> tuple[GroupGame | None, BunkerRevealResult | None, str | None]:
         async with self._lock_game(game_id):
             game = self._by_id.get(game_id)
@@ -3596,6 +3600,8 @@ class GameStore:
                 return game, None, "Это не «Бункер»"
             if game.status != "started" or game.phase != "bunker_reveal":
                 return game, None, "Сейчас не этап раскрытия"
+            if expected_reveal_cursor is not None and game.bunker_reveal_cursor != expected_reveal_cursor:
+                return game, None, "Этот ход уже завершён. Откройте актуальную карточку."
 
             actor_user_id = game.bunker_current_actor_user_id
             if actor_user_id is None:
