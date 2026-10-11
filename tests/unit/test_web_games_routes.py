@@ -1040,3 +1040,62 @@ async def test_quiz_finish_atomically_captures_feed_and_rejects_post_finish_upda
         quiz_feed_cleanup_ids=ids,
     ) is None
     assert ids == [504]
+
+@pytest.mark.asyncio
+async def test_web_manager_buttons_preserve_step_and_reject_stale_clicks(monkeypatch) -> None:
+    settings = _settings()
+    user = UserSnapshot(
+        telegram_user_id=210, username="host", first_name="Host", last_name=None, is_bot=False,
+    )
+    state = WebRepoState(
+        settings=settings,
+        user=user,
+        manageable_groups=[_overview(-6253, "Bunker Control", bot_role="game_master")],
+        chat_settings_by_chat={-6253: default_chat_settings(settings)},
+    )
+    async with _web_client(monkeypatch, state) as (client, store, safe_edit_mock, _send_roles_mock):
+        game, error = await store.create_lobby(
+            kind="bunker", chat_id=-6253, chat_title="Bunker Control",
+            owner_user_id=210, owner_label="host", reveal_eliminated_role=True,
+        )
+        assert error is None and game is not None
+        for user_id in range(211, 216):
+            joined, status = await store.join(
+                game_id=game.game_id, user_id=user_id, user_label=f"user{user_id}",
+            )
+            assert joined is not None and status == "joined"
+        started, error = await store.start(game_id=game.game_id)
+        assert error is None and started is not None
+        assert started.phase == "bunker_reveal"
+        original_cursor = started.bunker_reveal_cursor
+        advance = next(
+            button.callback_data
+            for row in web_app_module.game_router_module._build_game_manager_controls(started).inline_keyboard
+            for button in row
+            if button.callback_data.startswith("game:adv:")
+        )
+        assert advance.endswith(f":bunker_reveal:{started.round_no}:{original_cursor}")
+
+        page = await client.get("/app/games")
+        assert page.status_code == 200
+        assert advance in page.text
+        first = await client.post(
+            "/app/games/action", data={"callback_data": advance},
+            headers={"accept": "application/json"},
+        )
+        second = await client.post(
+            "/app/games/action", data={"callback_data": advance},
+            headers={"accept": "application/json"},
+        )
+        legacy = await client.post(
+            "/app/games/action", data={"callback_data": f"game:advance:{game.game_id}"},
+            headers={"accept": "application/json"},
+        )
+        current = await store.get_game(game.game_id)
+
+    assert first.status_code == 200 and first.json()["ok"] is True
+    assert second.status_code == 200 and second.json()["ok"] is False
+    assert "устарело" in second.json()["message"]
+    assert legacy.status_code == 200 and legacy.json()["ok"] is False
+    assert current is not None and current.bunker_reveal_cursor == original_cursor + 1
+    safe_edit_mock.assert_awaited()
