@@ -593,12 +593,19 @@ async def test_svg_code_dump_for_picture_request_is_corrected(prompt: str):
     assert "<svg" not in turn.text
 
 
-async def test_explicit_svg_code_request_is_not_forced_into_artifact():
+@pytest.mark.parametrize("prompt", [
+    "покажи исходник код SVG для картинки",
+    "Покажи изображение как SVG-разметку",
+    "Выведи SVG-разметку схемы",
+    "Сделай схему и выведи её кодом",
+    "Напиши код изображения",
+])
+async def test_explicit_svg_code_request_is_not_forced_into_artifact(prompt: str):
     llm = ScriptedLlm(_response(content='<svg><circle r="40"/></svg>'))
     run = _run(web=False, artifacts=True)
     turn = await run_tool_dialogue(
         llm_client=llm,
-        messages=[{"role": "user", "content": "покажи исходник код SVG для картинки"}],
+        messages=[{"role": "user", "content": prompt}],
         run=run,
     )
     assert len(llm.calls) == 1
@@ -637,6 +644,8 @@ async def test_unexecuted_get_artifact_promise_gets_one_real_retry():
     "Я не вызову get_artifact без разрешения.",
     "Плохой пример: «Сейчас вызову get_artifact».",
     "Инструмент get_artifact используется для чтения предыдущей картинки.",
+    "Сейчас можно вызвать get_artifact, если нужен исходник.",
+    "Теперь можно вызвать read_skill для ознакомления со справкой.",
 ])
 async def test_get_artifact_explanations_do_not_trigger_retries(reply: str):
     llm = ScriptedLlm(_response(content=reply))
