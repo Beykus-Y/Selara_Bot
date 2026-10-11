@@ -1094,8 +1094,8 @@ async def test_web_manager_buttons_preserve_step_and_reject_stale_clicks(monkeyp
         current = await store.get_game(game.game_id)
 
     assert first.status_code == 200 and first.json()["ok"] is True
-    assert second.status_code == 200 and second.json()["ok"] is False
+    assert second.status_code == 400 and second.json()["ok"] is False
     assert "устарело" in second.json()["message"]
-    assert legacy.status_code == 200 and legacy.json()["ok"] is False
+    assert legacy.status_code == 400 and legacy.json()["ok"] is False
     assert current is not None and current.bunker_reveal_cursor == original_cursor + 1
     safe_edit_mock.assert_awaited()
