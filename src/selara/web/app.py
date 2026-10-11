@@ -4175,7 +4175,9 @@ def create_web_app(*, settings: Settings, session_factory: async_sessionmaker[As
                 if game.kind == "bunker":
                     if game.phase == "bunker_reveal":
                         updated_game, result, error = await GAME_STORE.bunker_force_advance_reveal(
-                            game_id=game.game_id, expected_reveal_cursor=int(parts[5]),
+                            game_id=game.game_id,
+                            expected_round_no=int(parts[4]),
+                            expected_reveal_cursor=int(parts[5]),
                         )
                         if updated_game is None:
                             return False, "Игра не найдена."
