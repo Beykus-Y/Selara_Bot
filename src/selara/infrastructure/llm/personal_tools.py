@@ -53,7 +53,10 @@ _FALLBACK_NOTICE = "Не удалось получить ответ с помо�
 _UNSENT_ARTIFACT_NOTICE = (
     "Отправка изображения в Telegram не подтверждена. Текст или UUID не являются картинкой."
 )
-_VISUAL_REQUEST_RE = re.compile(r"\b(?:нарисуй|картинк\w*|иллюстрац\w*|артефакт\w*|инфографик\w*)\b", re.I)
+_VISUAL_REQUEST_RE = re.compile(
+    r"\b(?:нарисуй|картинк\w*|изображени\w*|схем\w*|рисунк\w*|иллюстрац\w*|артефакт\w*|инфографик\w*)\b",
+    re.I,
+)
 _EXPLICIT_CODE_RE = re.compile(r"\b(?:код|исходник|пример\s+svg)\b", re.I)
 _ARTIFACT_CLAIM_RE = re.compile(
     r"\b(?:артефакт|картинк[аиу]|изображени[ея])\b.{0,100}\b(?:создан|готов[ао]?|отправлен[ао]?)\b"
@@ -67,7 +70,7 @@ _UNFULFILLED_TOOL_NOTICE = (
 # Detect only concrete promises, not explanations of tool capabilities or a refusal.
 _TOOL_PROMISE_RE = re.compile(
     r"(?:\b(?:сейчас|сразу|теперь)\b.{0,90}\b(?:вызову|вызвать|запущу|прочитаю)\b"
-    r"|\b(?:вызову|запущу|прочитаю)\b).{0,90}\b(?:read_skill|create_artifact|send_artifact)\b",
+    r"|\b(?:вызову|запущу|прочитаю)\b).{0,90}\b(?:read_skill|get_artifact|create_artifact|send_artifact)\b",
     re.IGNORECASE | re.DOTALL,
 )
 
