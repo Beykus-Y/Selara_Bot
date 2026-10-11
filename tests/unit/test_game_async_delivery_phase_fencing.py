@@ -5,9 +5,11 @@ import asyncio
 import importlib
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.methods import SendMessage
 
 from selara.presentation.game_state import GameStore, GroupGame, RuntimeGameStore
 
@@ -265,3 +267,70 @@ async def test_quiz_rechecks_phase_after_delayed_persisted_take(monkeypatch):
     )
     bot.send_message.assert_not_awaited()
     bot.delete_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_quiz_rechecks_before_fallback_after_telegram_bad_request(monkeypatch):
+    game = _active_game(kind="quiz", phase="freeplay")
+    game.quiz_current_question_index = 1
+    game.message_id = 777
+    store = GameStore()
+    store._by_id[game.game_id] = game
+    monkeypatch.setattr(ui, "GAME_STORE", store)
+    attempts: list[dict] = []
+
+    class BrokenReplyBot:
+        async def send_message(self, **kwargs):
+            attempts.append(kwargs)
+            # Telegram rejected the reply, while another callback opened Q3.
+            game.quiz_current_question_index = 2
+            raise TelegramBadRequest(
+                method=SendMessage(chat_id=game.chat_id, text="probe"),
+                message="Bad Request: message to reply not found",
+            )
+
+        async def delete_message(self, **kwargs):
+            pytest.fail("No sent feed should need deletion")
+
+    await ui._sync_quiz_feed_message(
+        BrokenReplyBot(), game, question_no=2, expected_question_index=1,
+    )
+    assert len(attempts) == 1
+    assert attempts[0]["reply_to_message_id"] == 777
+    assert game.quiz_feed_message_id is None
+
+
+@pytest.mark.asyncio
+async def test_redis_delayed_zlob_error_cannot_extend_next_round_grace(monkeypatch):
+    game = _active_game(kind="zlobcards", phase="private_answers")
+    old_version = ui._timer_phase_version(game)
+
+    class DelayedError(tuple):
+        def __new__(cls):
+            item = super().__new__(cls, (game, "Нужно минимум два ответа для голосования"))
+            item.phase_version = old_version
+            return item
+
+    async def stale_zlob_open_vote(**kwargs):
+        # The store returned an error for round 2, then Redis persistence
+        # yielded long enough for a new round's private phase to begin.
+        game.round_no = 3
+        game.phase_started_at = datetime.now(timezone.utc)
+        return DelayedError()
+
+    monkeypatch.setattr(
+        ui, "GAME_STORE",
+        SimpleNamespace(zlob_open_vote=stale_zlob_open_vote),
+    )
+    schedule = Mock()
+    board = AsyncMock()
+    monkeypatch.setattr(ui, "_schedule_phase_timer_with_remaining", schedule)
+    monkeypatch.setattr(ui, "_safe_edit_or_send_game_board", board)
+
+    _, error = await ui._open_zlob_vote_phase(
+        SimpleNamespace(), game.game_id, SimpleNamespace(),
+        force=True, triggered_by_auto=True, expected_round_no=2,
+    )
+    assert error == "Нужно минимум два ответа для голосования"
+    schedule.assert_not_called()
+    board.assert_not_awaited()
