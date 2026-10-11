@@ -2765,9 +2765,30 @@ def _zlob_private_grace_remaining(game: GroupGame, *, now: datetime | None = Non
     return max(0.0, (deadline - now).total_seconds())
 
 
-def _timer_phase_version(game: GroupGame) -> tuple[str, str, int, datetime | None]:
+def _timer_phase_version(game: GroupGame) -> tuple[str | None, str | None, int | None, datetime | None]:
     """Immutable phase identity for guarding callbacks after async I/O."""
-    return game.kind, game.phase, game.round_no, game.phase_started_at
+    # Older transport stubs may omit optional fields; actual GroupGame always
+    # carries the complete state. Never depend on object identity for fencing.
+    return (
+        getattr(game, "kind", None),
+        getattr(game, "phase", None),
+        getattr(game, "round_no", None),
+        getattr(game, "phase_started_at", None),
+    )
+
+
+def _schedule_phase_timer_if_current(
+    bot: Bot,
+    game: GroupGame,
+    chat_settings: ChatSettings,
+    expected_phase_version: tuple[str | None, str | None, int | None, datetime | None],
+) -> None:
+    """Only arm a timer for the phase this async handler actually transitioned."""
+    if _timer_phase_version(game) != expected_phase_version:
+        return
+    # The check and scheduling execute without a yield, so a different
+    # callback cannot advance the mutable GroupGame between them.
+    _schedule_phase_timer(bot, game, chat_settings)
 
 
 def _schedule_phase_timer(
@@ -3381,7 +3402,7 @@ async def _advance_mafia_night(
 
     await _safe_edit_or_send_game_board(bot, game, chat_settings, note="\n".join(note_parts))
     await _send_game_feed_event(bot, game, text="\n".join(event_parts))
-    _schedule_phase_timer(bot, game, chat_settings, expected_phase_version=timer_phase_version)
+    _schedule_phase_timer_if_current(bot, game, chat_settings, timer_phase_version)
 
     if triggered_by_timer:
         logger.debug("Mafia night finished by timer", extra={"game_id": game.game_id})
@@ -3416,7 +3437,7 @@ async def _open_mafia_day_vote(
     note = "<b>Голосование открыто.</b> Проголосовать можно на доске или в ЛС-карточке от бота."
     await _safe_edit_or_send_game_board(bot, game, chat_settings, note=note)
     await _notify_mafia_day_vote_private(bot, game)
-    _schedule_phase_timer(bot, game, chat_settings, expected_phase_version=timer_phase_version)
+    _schedule_phase_timer_if_current(bot, game, chat_settings, timer_phase_version)
 
     if triggered_by_timer:
         logger.debug("Mafia day vote opened by timer", extra={"game_id": game.game_id})
@@ -3465,7 +3486,7 @@ async def _resolve_mafia_day_vote(
         await _safe_edit_or_send_game_board(bot, game, chat_settings, note="\n".join(note_parts))
         await _send_game_feed_event(bot, game, text="\n".join(event_parts))
         await _sync_execution_confirm_message(bot, game, force_new=True)
-        _schedule_phase_timer(bot, game, chat_settings, expected_phase_version=timer_phase_version)
+        _schedule_phase_timer_if_current(bot, game, chat_settings, timer_phase_version)
         return True
 
     if resolution.candidate_user_id is None:
@@ -3502,7 +3523,7 @@ async def _resolve_mafia_day_vote(
 
     await _safe_edit_or_send_game_board(bot, game, chat_settings, note="\n".join(note_parts))
     await _send_game_feed_event(bot, game, text="\n".join(event_parts))
-    _schedule_phase_timer(bot, game, chat_settings, expected_phase_version=timer_phase_version)
+    _schedule_phase_timer_if_current(bot, game, chat_settings, timer_phase_version)
     failed_dm = await _notify_mafia_night_actions(bot, game)
     await _warn_on_failed_dm(bot, game, failed_dm)
 
@@ -3597,7 +3618,7 @@ async def _resolve_mafia_execution_confirm(
 
     await _safe_edit_or_send_game_board(bot, game, chat_settings, note="\n".join(note_parts))
     await _send_game_feed_event(bot, game, text="\n".join(event_parts))
-    _schedule_phase_timer(bot, game, chat_settings, expected_phase_version=timer_phase_version)
+    _schedule_phase_timer_if_current(bot, game, chat_settings, timer_phase_version)
     failed_dm = await _notify_mafia_night_actions(bot, game)
     await _warn_on_failed_dm(bot, game, failed_dm)
 
@@ -3750,7 +3771,7 @@ async def _open_zlob_vote_phase(
         chat_settings,
         note="<b>Этап:</b> приватный выбор завершён, открыто голосование.",
     )
-    _schedule_phase_timer(bot, game, chat_settings, expected_phase_version=timer_phase_version)
+    _schedule_phase_timer_if_current(bot, game, chat_settings, timer_phase_version)
     if triggered_by_auto:
         logger.debug("Zlobcards vote opened automatically", extra={"game_id": game.game_id})
     return game, None
@@ -3803,7 +3824,7 @@ async def _resolve_zlob_round(
         chat_settings,
         note="\n".join(note_parts),
     )
-    _schedule_phase_timer(bot, game, chat_settings, expected_phase_version=timer_phase_version)
+    _schedule_phase_timer_if_current(bot, game, chat_settings, timer_phase_version)
     if triggered_by_auto:
         logger.debug("Zlobcards round resolved automatically", extra={"game_id": game.game_id})
     return game, None
@@ -4884,7 +4905,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             failed_role_dm = await _send_roles_to_private(bot, started_game)
 
         if started_game.kind == "mafia":
-            _schedule_phase_timer(bot, started_game, chat_settings, expected_phase_version=started_phase_version)
+            _schedule_phase_timer_if_current(bot, started_game, chat_settings, started_phase_version)
             failed_night_dm = await _notify_mafia_night_actions(bot, started_game)
             # One combined warning for both DMs (role card + first night's
             # action prompt) instead of two separate messages -- the same
@@ -4910,7 +4931,7 @@ async def game_callback(query: CallbackQuery, bot: Bot, chat_settings: ChatSetti
             return
 
         if started_game.kind == "zlobcards":
-            _schedule_phase_timer(bot, started_game, chat_settings, expected_phase_version=started_phase_version)
+            _schedule_phase_timer_if_current(bot, started_game, chat_settings, started_phase_version)
             await _send_game_feed_event(
                 bot,
                 started_game,
@@ -5823,7 +5844,7 @@ async def zlob_private_submit_callback(query: CallbackQuery, bot: Bot, chat_sett
         # A final early submission transitions the phase inside GameStore.
         # Replace the private-answer timer with a voting timer; simply
         # cancelling here previously left public_vote open indefinitely.
-        _schedule_phase_timer(bot, game, chat_settings, expected_phase_version=timer_phase_version)
+        _schedule_phase_timer_if_current(bot, game, chat_settings, timer_phase_version)
         await _safe_edit_or_send_game_board(
             bot,
             game,
