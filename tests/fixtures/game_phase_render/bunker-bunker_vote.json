@@ -50,7 +50,7 @@
       [
         {
           "text": "⏭ Завершить голосование",
-          "callback_data": "game:adv:fixture:bunker_vote:2"
+          "callback_data": "game:adv:fixture:bunker_vote:2:0"
         }
       ],
       [
