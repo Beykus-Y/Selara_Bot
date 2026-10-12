@@ -4,8 +4,11 @@ import asyncio
 import hashlib
 import logging
 import random
+import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 import httpx
@@ -25,6 +28,13 @@ _ACTIVE_BANNERS = GACHA_BANNER_CODES
 _VARIANT_CAP = 3
 _REGENERATE_PROBABILITY = 0.15
 _FILLER_COUNT = 10
+
+# At most one reel render at a time. A render holds its frames plus an ffmpeg child, so two overlapping renders
+# were enough to exceed the container's memory limit on 2026-10-12. The slot is released by the render thread itself,
+# so a render that a timeout has abandoned still holds it until the thread really ends.
+_RENDER_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gacha-reel")
+_render_slot = threading.BoundedSemaphore(1)
+_RENDER_SLOT_POLL_SECONDS = 1.0
 
 # Hard ceiling on a single card's warmup (render + Telegram upload + delete).
 # Without this, a hung network call (e.g. a dead-but-not-closed connection
@@ -200,6 +210,46 @@ class ResolvedReelAnimation:
     cache_version: str
 
 
+class GachaRenderBusyError(RuntimeError):
+    """Another reel render still holds the slot, so this pull goes out without an animation instead of waiting."""
+
+
+async def _acquire_render_slot(*, wait: bool) -> None:
+    if not wait:
+        if not _render_slot.acquire(blocking=False):
+            raise GachaRenderBusyError("a gacha reel render is already running")
+        return
+    while not _render_slot.acquire(blocking=False):
+        await asyncio.sleep(_RENDER_SLOT_POLL_SECONDS)
+
+
+def _render_reel_in_worker(
+    *, build_kwargs: dict, settings: Settings, banner: str, card_code: str, cache_version: str
+) -> bytes:
+    """Runs in `_RENDER_EXECUTOR`. The MP4 goes to the local disk tier from this thread as well, so a render that a
+    timeout has abandoned is not thrown away: it is picked up from disk on the next attempt."""
+    try:
+        started = time.monotonic()
+        content = build_gacha_reel_animation(**build_kwargs)
+        rendered = time.monotonic()
+        _write_local_reel_atomic(
+            settings=settings, banner=banner, card_code=card_code, cache_version=cache_version, content=content
+        )
+        logger.info(
+            "Gacha reel rendered: banner=%s card=%s version=%s render_seconds=%.1f write_seconds=%.2f",
+            banner, card_code, cache_version, rendered - started, time.monotonic() - rendered,
+        )
+        return content
+    finally:
+        _render_slot.release()
+
+
+def _release_slot_if_cancelled(job: Future) -> None:
+    """A job cancelled before a worker picks it up never reaches the `finally` above, so the slot would stay taken."""
+    if job.cancelled():
+        _render_slot.release()
+
+
 async def _render_reel_gif(
     *,
     settings: Settings,
@@ -208,6 +258,8 @@ async def _render_reel_gif(
     landing_card_name: str,
     landing_rarity_label: str,
     landing_border_color: tuple[int, int, int],
+    cache_version: str,
+    wait_for_slot: bool = False,
 ) -> bytes:
     catalog = await _get_banner_catalog(settings, banner)
     filler_pool = [card for card in catalog.cards if card.code != landing_card_code] or list(catalog.cards)
@@ -243,13 +295,30 @@ async def _render_reel_gif(
     )
     # Pillow rendering is synchronous CPU-bound work (~4-10s) — calling it
     # directly here would freeze the whole bot's event loop for every user
-    # for the entire render, not just this one card. Offload to a thread.
-    return await asyncio.to_thread(
-        build_gacha_reel_animation,
-        background_bytes=_background_path_for_banner(banner).read_bytes(),
-        landing_card=landing_card,
-        filler_cards=filler_cards,
-    )
+    # for the entire render, not just this one card. It runs in a worker
+    # thread of its own, which also releases the render slot when it ends.
+    build_kwargs = {
+        "background_bytes": _background_path_for_banner(banner).read_bytes(),
+        "landing_card": landing_card,
+        "filler_cards": filler_cards,
+    }
+    await _acquire_render_slot(wait=wait_for_slot)
+    try:
+        job = _RENDER_EXECUTOR.submit(
+            partial(
+                _render_reel_in_worker,
+                build_kwargs=build_kwargs,
+                settings=settings,
+                banner=banner,
+                card_code=landing_card_code,
+                cache_version=cache_version,
+            ),
+        )
+    except BaseException:
+        _render_slot.release()
+        raise
+    job.add_done_callback(_release_slot_if_cancelled)
+    return await asyncio.wrap_future(job)
 
 
 async def resolve_gacha_reel_animation(
@@ -262,12 +331,19 @@ async def resolve_gacha_reel_animation(
     landing_rarity: str,
     landing_rarity_label: str,
     skip_cached_lookup: bool = False,
+    wait_for_render_slot: bool = False,
+    release_connection=None,
 ) -> ResolvedReelAnimation:
     """Three tiers, cheapest first: Telegram `file_id` (Postgres, решение 9's
     hybrid cache) → local GIF on disk (survives restarts, avoids a re-render
     if a stored file_id ever goes bad) → full Pillow render. `skip_cached_lookup`
     bypasses tier 1 — used when a caller already tried a stored file_id and
     Telegram rejected it, so retrying the same file_id would just fail again.
+    A render only starts when no other render is running: user pulls pass
+    `wait_for_render_slot=False` and get `GachaRenderBusyError` instead of
+    queueing; the warmup waits for its turn. `release_connection` is awaited
+    right before a render, so the caller's pooled connection is not held
+    through the render.
     Caching the *result* of a successful send (a new file_id) is the
     caller's job via `cache_reel_variant_after_send`, not this function's —
     this function only decides what to try sending."""
@@ -305,6 +381,8 @@ async def resolve_gacha_reel_animation(
         "Gacha reel resolved: tier=render banner=%s card=%s version=%s",
         banner, landing_card_code, cache_version,
     )
+    if release_connection is not None:
+        await release_connection()
     mp4_bytes = await _render_reel_gif(
         settings=settings,
         banner=banner,
@@ -312,9 +390,8 @@ async def resolve_gacha_reel_animation(
         landing_card_name=landing_card_name,
         landing_rarity_label=landing_rarity_label,
         landing_border_color=_rarity_border_color(landing_rarity),
-    )
-    _write_local_reel_atomic(
-        settings=settings, banner=banner, card_code=landing_card_code, cache_version=cache_version, content=mp4_bytes
+        cache_version=cache_version,
+        wait_for_slot=wait_for_render_slot,
     )
     filename = f"gacha_reel_{banner}_{landing_card_code}.mp4"
     return ResolvedReelAnimation(
@@ -358,7 +435,7 @@ async def is_gacha_animation_cache_ready(settings: Settings, activity_repo, bann
 
 
 async def warm_up_gacha_animation_cache(
-    *, settings: Settings, bot: Bot, activity_repo, on_card_done=None, on_card_error=None
+    *, settings: Settings, bot: Bot, activity_repo, on_card_done=None, on_card_error=None, release_connection=None
 ) -> None:
     """Fire-and-forget background warmup (see docs/GACHA_MODERNIZATION_TODO.md,
     раздел 10): ensures at least one cached variant per card across active
@@ -378,9 +455,21 @@ async def warm_up_gacha_animation_cache(
         except Exception:
             logger.warning("Gacha animation warmup: failed to load catalog for %s", banner, exc_info=True)
             continue
+        if release_connection is not None:
+            # Ends the read-only transaction now, before the per-card version checks make network calls.
+            await release_connection()
 
         for card in catalog.cards:
-            if card.code in cached_versions:
+            try:
+                current_version = await _compute_landing_cache_version(
+                    settings, banner=banner, landing_card_code=card.code
+                )
+            except Exception:
+                logger.warning("Gacha animation warmup: cannot compute cache version for %s/%s", banner, card.code, exc_info=True)
+                continue
+            # Compare with the version the renderer produces today, not with "any version": after a renderer change the
+            # old variants are stale, and a user pull would otherwise render live inside its handler.
+            if current_version in cached_versions.get(card.code, set()):
                 continue
             try:
                 await asyncio.wait_for(
@@ -391,6 +480,7 @@ async def warm_up_gacha_animation_cache(
                         banner=banner,
                         card=card,
                         on_card_done=on_card_done,
+                        release_connection=release_connection,
                     ),
                     timeout=_WARMUP_CARD_TIMEOUT_SECONDS,
                 )
@@ -427,7 +517,9 @@ async def _safe_on_card_error(on_card_error, *, banner: str, card_code: str) -> 
         logger.warning("Gacha animation warmup: rollback after failure also failed for %s/%s", banner, card_code, exc_info=True)
 
 
-async def _warm_up_one_card(*, settings: Settings, bot: Bot, activity_repo, banner: str, card, on_card_done) -> None:
+async def _warm_up_one_card(
+    *, settings: Settings, bot: Bot, activity_repo, banner: str, card, on_card_done, release_connection=None
+) -> None:
     resolved = await resolve_gacha_reel_animation(
         settings=settings,
         activity_repo=activity_repo,
@@ -436,6 +528,8 @@ async def _warm_up_one_card(*, settings: Settings, bot: Bot, activity_repo, bann
         landing_card_name=card.name,
         landing_rarity=card.rarity,
         landing_rarity_label=card.rarity_label,
+        wait_for_render_slot=True,
+        release_connection=release_connection,
     )
     sent = await bot.send_animation(chat_id=settings.gacha_admin_user_id, animation=resolved.payload)
     if resolved.needs_caching and getattr(sent, "animation", None) is not None:

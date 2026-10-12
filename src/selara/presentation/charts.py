@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import functools
 import logging
+import threading
 from io import BytesIO
 from typing import Sequence
 
@@ -21,6 +23,19 @@ def _safe_import_matplotlib():
         return plt
     except Exception:
         return None
+
+
+# pyplot keeps figure state in module globals, so two charts built on worker threads at once could mix their figures.
+_PYPLOT_LOCK = threading.Lock()
+
+
+def _serialized_pyplot(build):
+    @functools.wraps(build)
+    def wrapper(*args, **kwargs):
+        with _PYPLOT_LOCK:
+            return build(*args, **kwargs)
+
+    return wrapper
 
 
 _FIGURE_BG = "#07131f"
@@ -82,6 +97,7 @@ def _truncate_label(value: str, *, limit: int = 24) -> str:
     return f"{value[:limit - 3]}..."
 
 
+@_serialized_pyplot
 def build_profile_chart(*, activity_all: int, activity_7d: int, karma_all: int, karma_7d: int) -> bytes | None:
     plt = _safe_import_matplotlib()
     if plt is None:
@@ -127,6 +143,7 @@ def build_profile_chart(*, activity_all: int, activity_7d: int, karma_all: int, 
     return buffer.getvalue()
 
 
+@_serialized_pyplot
 def build_daily_activity_chart(*, points: Sequence[tuple[str, int]]) -> bytes | None:
     if not points:
         return None
@@ -249,6 +266,7 @@ def build_daily_activity_chart(*, points: Sequence[tuple[str, int]]) -> bytes | 
 
 
 
+@_serialized_pyplot
 def build_leaderboard_chart(items: list[LeaderboardItem], *, mode: LeaderboardMode) -> bytes | None:
     if not items:
         return None

@@ -47,10 +47,8 @@ class PaymentSafeDispatcher(Dispatcher):
 
         async def process_with_semaphore(coro) -> bool:
             assert semaphore is not None
-            try:
+            async with semaphore:
                 return await coro
-            finally:
-                semaphore.release()
 
         try:
             async for update in self._listen_updates(
@@ -64,8 +62,9 @@ class PaymentSafeDispatcher(Dispatcher):
                     await handler
                     continue
 
+                # The slot is taken inside the task. Waiting for it here would stop the loop from reading the updates
+                # behind this one, including a pre-checkout query that Telegram expects an answer to within ten seconds.
                 if semaphore is not None:
-                    await semaphore.acquire()
                     task = asyncio.create_task(process_with_semaphore(handler))
                 else:
                     task = asyncio.create_task(handler)

@@ -24,7 +24,12 @@ from selara.infrastructure.db.chat_member_snapshots import run_chat_member_count
 from selara.infrastructure.db.market_expiry_sweeper import run_market_expiry_scheduler
 from selara.infrastructure.db.message_archive_retention import run_message_archive_retention_scheduler
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
-from selara.infrastructure.db.session import DatabaseAdmission, create_engine, create_session_factory
+from selara.infrastructure.db.session import (
+    DatabaseAdmission,
+    create_engine,
+    create_session_factory,
+    describe_session_pool,
+)
 from selara.infrastructure.http.web_search import build_web_search_client
 from selara.infrastructure.llm import LlmClient
 from selara.infrastructure.llm.runtime import llm_runtime_problem
@@ -40,6 +45,7 @@ from selara.presentation.gacha_reel_orchestration import (
 )
 from selara.presentation.game_state import GAME_STORE
 from selara.presentation.handlers.game.router import restore_phase_timers
+from selara.presentation.handlers.text_commands import drain_gacha_background_tasks
 from selara.presentation.middlewares.error_alert_config import load_error_alert_config
 from selara.presentation.daily_summary import run_daily_summary_scheduler
 from selara.presentation.interesting_facts import run_interesting_facts_scheduler
@@ -163,6 +169,7 @@ async def _run_gacha_animation_warmup(settings, bot, session_factory) -> None:
                 activity_repo=activity_repo,
                 on_card_done=session.commit,
                 on_card_error=session.rollback,
+                release_connection=session.commit,
             )
             if not was_ready and settings.admin_user_id is not None:
                 is_ready_now = await is_gacha_animation_cache_ready(settings, activity_repo)
@@ -175,6 +182,22 @@ async def _run_gacha_animation_warmup(settings, bot, session_factory) -> None:
                         logger.exception("Could not notify admin about gacha animation warmup completion")
     except Exception:
         logger.exception("Gacha animation warmup task crashed")
+
+
+async def _log_db_pressure(session_factory, admission: DatabaseAdmission, *, interval_seconds: float = 60.0) -> None:
+    """Pool and admission counters, logged periodically so that pool pressure shows up before it turns into timeouts."""
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            # Opening a session takes no connection until it runs a query, so this only reads the pool's counters.
+            async with session_factory() as session:
+                pool = describe_session_pool(session)
+            logger.info(
+                "DB pressure: pool=%s admission_in_use=%d admission_waiting=%d",
+                pool, admission.in_use, admission.waiting,
+            )
+        except Exception:
+            logger.warning("DB pressure log failed", exc_info=True)
 
 
 async def _refresh_bot_polling_heartbeat() -> None:
@@ -208,13 +231,14 @@ async def _run_bot(settings, session_factory) -> None:
     logger.info("Web search client: %s",
                 f"OK ({web_search_client.provider_name})" if web_search_client is not None else "None (disabled)")
     dispatcher = PaymentSafeDispatcher()
+    db_admission = DatabaseAdmission.from_settings(settings)
     dispatcher.include_router(
         build_router(
             session_factory,
             activity_batcher=activity_batcher,
             stt_client=stt_client,
             llm_client=llm_client,
-            db_admission=DatabaseAdmission.from_settings(settings),
+            db_admission=db_admission,
         )
     )
 
@@ -245,9 +269,13 @@ async def _run_bot(settings, session_factory) -> None:
         )
     else:
         logger.warning("Daily backup scheduler is disabled because ADMIN_USER_ID is not configured.")
-    gacha_warmup_task = asyncio.create_task(
-        _run_gacha_animation_warmup(settings, bot, session_factory), name="gacha-animation-warmup"
-    )
+    gacha_warmup_task = None
+    if settings.gacha_warmup_enabled:
+        gacha_warmup_task = asyncio.create_task(
+            _run_gacha_animation_warmup(settings, bot, session_factory), name="gacha-animation-warmup"
+        )
+    else:
+        logger.info("Gacha animation warmup is disabled (GACHA_WARMUP_ENABLED is false).")
     chat_member_snapshot_task = asyncio.create_task(
         run_chat_member_count_snapshot_scheduler(bot=bot, session_factory=session_factory),
         name="chat-member-count-snapshots",
@@ -284,6 +312,7 @@ async def _run_bot(settings, session_factory) -> None:
         "settings": settings,
         "session_factory": session_factory,
         "personal_config": personal_config,
+        "tasks_concurrency_limit": settings.telegram_update_concurrency_limit,
     }
     if stt_client is not None:
         polling_kwargs["stt_client"] = stt_client
@@ -295,20 +324,26 @@ async def _run_bot(settings, session_factory) -> None:
         polling_kwargs["daily_summary_stt_queue"] = daily_summary_stt_queue
 
     heartbeat_task = asyncio.create_task(_refresh_bot_polling_heartbeat(), name="bot-polling-heartbeat")
+    db_pressure_task = asyncio.create_task(_log_db_pressure(session_factory, db_admission), name="db-pressure-log")
     mark_bot_polling_started()
     try:
         await dispatcher.start_polling(bot, **polling_kwargs)
     finally:
+        # Pending gacha results go out while the bot session is still open, which happens further down.
+        await drain_gacha_background_tasks()
         mark_bot_polling_stopped()
         heartbeat_task.cancel()
         await asyncio.gather(heartbeat_task, return_exceptions=True)
+        db_pressure_task.cancel()
+        await asyncio.gather(db_pressure_task, return_exceptions=True)
         interesting_facts_task.cancel()
         await asyncio.gather(interesting_facts_task, return_exceptions=True)
         if backup_task is not None:
             backup_task.cancel()
             await asyncio.gather(backup_task, return_exceptions=True)
-        gacha_warmup_task.cancel()
-        await asyncio.gather(gacha_warmup_task, return_exceptions=True)
+        if gacha_warmup_task is not None:
+            gacha_warmup_task.cancel()
+            await asyncio.gather(gacha_warmup_task, return_exceptions=True)
         chat_member_snapshot_task.cancel()
         await asyncio.gather(chat_member_snapshot_task, return_exceptions=True)
         market_expiry_task.cancel()
