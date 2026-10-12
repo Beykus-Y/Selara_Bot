@@ -328,7 +328,7 @@ _CACHED_VERSIONS_BY_BANNER = {
 
 @pytest.mark.asyncio
 async def test_cache_ready_false_when_a_card_has_no_variant_at_all(monkeypatch: pytest.MonkeyPatch) -> None:
-    orch._animation_cache_ready = False
+    orch._ready_animation_banners.clear()
     catalogs = {
         "genshin": SimpleNamespace(cards=[SimpleNamespace(code="furina"), SimpleNamespace(code="amber")]),
         "hsr": SimpleNamespace(cards=[SimpleNamespace(code="kafka")]),
@@ -344,12 +344,12 @@ async def test_cache_ready_false_when_a_card_has_no_variant_at_all(monkeypatch: 
     result = await orch.is_gacha_animation_cache_ready(SimpleNamespace(), activity_repo)
 
     assert result is False  # "amber" has no variant at all
-    assert orch._animation_cache_ready is False
+    assert orch._ready_animation_banners == set()
 
 
 @pytest.mark.asyncio
 async def test_cache_ready_true_and_sticky_once_every_card_has_a_variant(monkeypatch: pytest.MonkeyPatch) -> None:
-    orch._animation_cache_ready = False
+    orch._ready_animation_banners.clear()
     catalogs = {
         "genshin": SimpleNamespace(cards=[SimpleNamespace(code="furina")]),
         "hsr": SimpleNamespace(cards=[SimpleNamespace(code="kafka")]),
@@ -374,8 +374,32 @@ async def test_cache_ready_true_and_sticky_once_every_card_has_a_variant(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_cold_zzz_does_not_block_warm_genshin_and_hsr(monkeypatch: pytest.MonkeyPatch) -> None:
+    orch._ready_animation_banners.clear()
+    catalogs = {
+        "genshin": SimpleNamespace(cards=[SimpleNamespace(code="furina")]),
+        "hsr": SimpleNamespace(cards=[SimpleNamespace(code="kafka")]),
+        "zzz": SimpleNamespace(cards=[SimpleNamespace(code="rina"), SimpleNamespace(code="aria")]),
+    }
+    monkeypatch.setattr(orch, "_get_banner_catalog", AsyncMock(side_effect=lambda settings, banner: catalogs[banner]))
+    activity_repo = SimpleNamespace(
+        get_gacha_animation_cached_versions_by_card=AsyncMock(
+            side_effect=lambda *, banner: _CACHED_VERSIONS_BY_BANNER[banner]
+        )
+    )
+
+    # "aria" has no variant yet, so only ZZZ is cold.
+    assert await orch.is_gacha_animation_cache_ready(SimpleNamespace(), activity_repo, banner="genshin") is True
+    assert await orch.is_gacha_animation_cache_ready(SimpleNamespace(), activity_repo, banner="hsr") is True
+    assert await orch.is_gacha_animation_cache_ready(SimpleNamespace(), activity_repo, banner="zzz") is False
+    # The global gate used for warmup status still reports not ready while ZZZ is cold.
+    assert await orch.is_gacha_animation_cache_ready(SimpleNamespace(), activity_repo) is False
+    assert orch._ready_animation_banners == {"genshin", "hsr"}
+
+
+@pytest.mark.asyncio
 async def test_warm_up_generates_only_missing_cards_and_deletes_warmup_message(monkeypatch: pytest.MonkeyPatch) -> None:
-    orch._animation_cache_ready = False
+    orch._ready_animation_banners.clear()
     catalog = SimpleNamespace(
         cards=[
             SimpleNamespace(code="furina", name="Фурина", rarity="mythic", rarity_label="🟥"),
@@ -417,7 +441,7 @@ async def test_warm_up_calls_on_card_done_after_each_successful_card(monkeypatch
     commit incrementally (per card), not once at the very end — otherwise a
     restart mid-warmup re-does DB work for cards whose (cheap) local-disk
     GIF already exists (see docs/GACHA_MODERNIZATION_TODO.md, раздел 12)."""
-    orch._animation_cache_ready = False
+    orch._ready_animation_banners.clear()
     catalog = SimpleNamespace(
         cards=[
             SimpleNamespace(code="furina", name="Фурина", rarity="mythic", rarity_label="🟥"),
@@ -462,7 +486,7 @@ async def test_warm_up_skips_entirely_without_admin_user_id_configured() -> None
 async def test_warm_up_continues_past_a_single_card_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """One card failing to render/send must not abort warmup for the rest
     of the catalog."""
-    orch._animation_cache_ready = False
+    orch._ready_animation_banners.clear()
     catalog = SimpleNamespace(
         cards=[
             SimpleNamespace(code="broken", name="Broken", rarity="common", rarity_label="⬜"),
@@ -504,7 +528,7 @@ async def test_warm_up_rolls_back_session_after_a_card_fails(monkeypatch: pytest
     ever actually lands in the DB (found live, 2026-08-19: warmup ran for
     ~45 min, sent many cards, but the cached-variant count never moved past
     the point of the first failure)."""
-    orch._animation_cache_ready = False
+    orch._ready_animation_banners.clear()
     catalog = SimpleNamespace(
         cards=[
             SimpleNamespace(code="broken", name="Broken", rarity="common", rarity_label="⬜"),
@@ -546,7 +570,7 @@ async def test_warm_up_survives_on_card_error_itself_raising(monkeypatch: pytest
     against a flaky SSH-tunneled connection: one dropped connection crashed
     the whole warmup process instead of just skipping that card, wiping out
     all further progress for the rest of the catalog."""
-    orch._animation_cache_ready = False
+    orch._ready_animation_banners.clear()
     catalog = SimpleNamespace(
         cards=[
             SimpleNamespace(code="broken", name="Broken", rarity="common", rarity_label="⬜"),
@@ -587,7 +611,7 @@ async def test_warm_up_skips_a_card_that_hangs_instead_of_stalling_forever(monke
     that never times out on its own) must not stall the rest of the warmup
     forever with zero log output — found live 2026-08-19: warmup stalled on
     one card for 4+ hours with no error and no further progress."""
-    orch._animation_cache_ready = False
+    orch._ready_animation_banners.clear()
     monkeypatch.setattr(orch, "_WARMUP_CARD_TIMEOUT_SECONDS", 0.05)
     catalog = SimpleNamespace(
         cards=[
