@@ -112,9 +112,10 @@ def _bot():
 async def test_reader_keeps_reading_past_the_ceiling_and_drops_the_ordinary_updates_that_do_not_fit(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """With every handler stalled, four times the concurrency limit is admitted and the updates past it are dropped with
-    a warning. The reader still reads the whole batch, so memory stays bounded without holding up what comes next."""
-    dispatcher = PaymentSafeDispatcher()
+    """With every handler stalled, the configured ceiling is admitted and the updates past it are dropped and counted. The
+    reader still reads the whole batch, so memory stays bounded without holding up what comes next. The burst logs one
+    warning, not one line per dropped update."""
+    dispatcher = PaymentSafeDispatcher(max_pending_updates=8)
     read: list[int] = []
     handled: list[int] = []
     release = asyncio.Event()
@@ -134,10 +135,11 @@ async def test_reader_keeps_reading_past_the_ceiling_and_drops_the_ordinary_upda
 
     await asyncio.wait_for(dispatcher._polling(_bot(), tasks_concurrency_limit=2), timeout=2)
 
-    # Eight admitted tasks (2 * 4). The other 22 updates were read and dropped.
+    # Eight admitted tasks. The other 22 updates were read and dropped.
     assert read == list(range(30))
     assert len(dispatcher._handle_update_tasks) == 8
-    assert "Dropped update id=8" in caplog.text
+    assert dispatcher.dropped_updates == 22
+    assert caplog.text.count("Dropped ") == 1
 
     release.set()
     await _wait_until(lambda: len(handled) == 8)
@@ -151,7 +153,7 @@ async def test_pre_checkout_read_behind_an_ordinary_update_at_the_ceiling_is_dis
 ) -> None:
     """Regression: the reader used to park on an ordinary update once the ceiling was full, so a pre-checkout query read
     after it waited for a stalled handler to finish. Telegram allows ten seconds for that answer."""
-    dispatcher = PaymentSafeDispatcher()
+    dispatcher = PaymentSafeDispatcher(max_pending_updates=4)
     pre_checkout = SimpleNamespace(update_id=99, pre_checkout_query=SimpleNamespace(id="q"), message=None)
     release = asyncio.Event()
     pending_when_payment: list[int] = []
@@ -160,7 +162,7 @@ async def test_pre_checkout_read_behind_an_ordinary_update_at_the_ceiling_is_dis
     async def listen_updates(*_args, **_kwargs):
         for update_id in range(4):
             yield _plain_update(update_id)
-        # The ceiling (1 * 4) is full. This ordinary update is the one a parked reader used to wait on.
+        # The ceiling (4) is full. This ordinary update is the one a parked reader used to wait on.
         yield _plain_update(4)
         yield pre_checkout
 
@@ -190,7 +192,7 @@ async def test_payment_read_while_pending_ceiling_is_full_is_dispatched_at_once(
 ) -> None:
     """A payment does not take a pending slot, so it is handled even when the ceiling is full and every ordinary
     handler is still stalled. Telegram's pre-checkout deadline does not wait for the queue to drain."""
-    dispatcher = PaymentSafeDispatcher()
+    dispatcher = PaymentSafeDispatcher(max_pending_updates=4)
     pre_checkout = SimpleNamespace(update_id=99, pre_checkout_query=SimpleNamespace(id="q"), message=None)
     release = asyncio.Event()
     pending_when_payment: list[int] = []
@@ -199,7 +201,7 @@ async def test_payment_read_while_pending_ceiling_is_full_is_dispatched_at_once(
     async def listen_updates(*_args, **_kwargs):
         for update_id in range(4):
             yield _plain_update(update_id)
-        # The reader has now admitted four ordinary updates (1 * 4), so the ceiling is exactly full.
+        # The reader has now admitted four ordinary updates, so the ceiling is exactly full.
         yield pre_checkout
 
     async def process_update(*, bot, update, **_kwargs) -> bool:
@@ -225,7 +227,7 @@ async def test_payment_read_while_pending_ceiling_is_full_is_dispatched_at_once(
 async def test_failed_handler_releases_its_pending_slot(monkeypatch: pytest.MonkeyPatch) -> None:
     """A handler that raises must free its pending slot, or every later ordinary update would be dropped once the ceiling
     was reached."""
-    dispatcher = PaymentSafeDispatcher()
+    dispatcher = PaymentSafeDispatcher(max_pending_updates=4)
     handled: list[int] = []
 
     async def listen_updates(*_args, **_kwargs):
@@ -253,7 +255,7 @@ async def test_failed_handler_releases_its_pending_slot(monkeypatch: pytest.Monk
 async def test_cancelling_polling_while_the_queue_is_full_stops_promptly(monkeypatch: pytest.MonkeyPatch) -> None:
     """Shutdown cancels the reader even while handlers are stalled and the ceiling is full. The stalled handlers do not
     hold it up."""
-    dispatcher = PaymentSafeDispatcher()
+    dispatcher = PaymentSafeDispatcher(max_pending_updates=4)
     read: list[int] = []
     never = asyncio.Event()
 
@@ -286,3 +288,45 @@ async def test_cancelling_polling_while_the_queue_is_full_stops_promptly(monkeyp
     for task in stalled:
         task.cancel()
     await asyncio.gather(*stalled, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_the_pending_limit_is_absolute_and_payments_still_bypass_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ceiling is the configured number of pending ordinary updates. It does not scale with the concurrency limit: two
+    handler slots with a ceiling of three admit three updates, not eight. A payment read at the full ceiling is still
+    handled at once, and it does not count against the limit."""
+    dispatcher = PaymentSafeDispatcher(max_pending_updates=3)
+    pre_checkout = SimpleNamespace(update_id=99, pre_checkout_query=SimpleNamespace(id="q"), message=None)
+    release = asyncio.Event()
+    pending_when_payment: list[int] = []
+    handled: list[int] = []
+
+    async def listen_updates(*_args, **_kwargs):
+        for update_id in range(10):
+            yield _plain_update(update_id)
+        yield pre_checkout
+
+    async def process_update(*, bot, update, **_kwargs) -> bool:
+        if update.update_id == 99:
+            pending_when_payment.append(len(dispatcher._handle_update_tasks))
+        else:
+            await release.wait()
+        handled.append(update.update_id)
+        return True
+
+    monkeypatch.setattr(dispatcher, "_listen_updates", listen_updates)
+    monkeypatch.setattr(dispatcher, "_process_update", process_update)
+
+    await asyncio.wait_for(dispatcher._polling(_bot(), tasks_concurrency_limit=2), timeout=2)
+
+    assert dispatcher.dropped_updates == 7
+    assert pending_when_payment == [3]
+    assert handled == [99]
+    release.set()
+    await _wait_until(lambda: sorted(handled) == [0, 1, 2, 99])
+
+
+@pytest.mark.asyncio
+async def test_the_pending_limit_must_be_at_least_one() -> None:
+    with pytest.raises(ValueError):
+        PaymentSafeDispatcher(max_pending_updates=0)

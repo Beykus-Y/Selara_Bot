@@ -1365,6 +1365,38 @@ async def test_render_releases_the_slot_when_its_downloads_are_cut_off(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_a_failed_portrait_download_cancels_its_siblings_before_the_slot_is_given_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """The slot is given back as soon as the render call fails. A sibling download still running then would keep a request
+    open against a client that is already closing, while another render starts downloading beside it."""
+    monkeypatch.setattr(orch, "_get_banner_catalog", AsyncMock(return_value=_render_test_catalog()))
+    calls: list[str] = []
+    sibling_cancelled: list[bool] = []
+
+    async def fetch(client, url) -> bytes:
+        calls.append(url)
+        if len(calls) == 1:
+            raise httpx.ConnectError("network down")
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            sibling_cancelled.append(True)
+            raise
+        return b"img-bytes"
+
+    monkeypatch.setattr(orch, "_fetch_bytes_cached", fetch)
+
+    with pytest.raises(httpx.ConnectError):
+        await orch._render_reel_gif(**_render_kwargs(tmp_path))
+
+    assert len(calls) > 1
+    assert len(sibling_cancelled) == len(calls) - 1  # every sibling had finished cancelling when the error surfaced
+    assert orch._render_slot.acquire(blocking=False)
+    orch._render_slot.release()
+
+
+@pytest.mark.asyncio
 async def test_a_hung_admin_delete_keeps_the_cached_file_id_and_the_card_is_not_sent_again(monkeypatch: pytest.MonkeyPatch) -> None:
     """The delete used to share the upload budget and the transaction. Once Telegram had accepted the file, a hung delete
     timed the card out, the session rolled back the file_id, and the next pass uploaded the same MP4 again."""

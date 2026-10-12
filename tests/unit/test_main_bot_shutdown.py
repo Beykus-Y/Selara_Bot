@@ -28,6 +28,7 @@ def _settings() -> SimpleNamespace:
         gacha_warmup_enabled=False,
         admin_user_id=None,
         telegram_update_concurrency_limit=40,
+        telegram_pending_updates_limit=2000,
         activity_batch_flush_seconds=1.0,
         activity_batch_max_events=100,
         activity_batch_close_grace_seconds=5.0,

@@ -116,6 +116,21 @@ async def _fetch_bytes_cached(client: httpx.AsyncClient, url: str) -> bytes:
         _image_cache.pop(url, None)
     return content
 
+
+async def _fetch_portraits(client: httpx.AsyncClient, filler_urls: list[str], landing_url: str) -> tuple[list[bytes], bytes]:
+    """Downloads the filler and landing portraits together. When one fails, the others are cancelled and awaited before the
+    error is raised again, so no request outlives the render slot that the caller gives back next."""
+    downloads = [asyncio.create_task(_fetch_bytes_cached(client, url)) for url in (*filler_urls, landing_url)]
+    try:
+        results = await asyncio.gather(*downloads)
+    except BaseException:
+        for download in downloads:
+            download.cancel()
+        await asyncio.gather(*downloads, return_exceptions=True)
+        raise
+    return list(results[:-1]), results[-1]
+
+
 _BACKGROUND_PATH = Path(__file__).resolve().parents[1] / "images" / "gacha_animation" / "reel_background_genshin.png"
 
 _RARITY_BORDER_COLORS: dict[str, tuple[int, int, int]] = {
@@ -302,9 +317,8 @@ async def _render_reel_gif(
         if local_bytes is not None:
             return local_bytes
         async with httpx.AsyncClient(timeout=settings.gacha_timeout_seconds, follow_redirects=True) as client:
-            filler_bytes, landing_image_bytes = await asyncio.gather(
-                asyncio.gather(*(_fetch_bytes_cached(client, card.image_url) for card in chosen)),
-                _fetch_bytes_cached(client, landing_image_url),
+            filler_bytes, landing_image_bytes = await _fetch_portraits(
+                client, [card.image_url for card in chosen], landing_image_url
             )
         filler_cards = [
             ReelCard(
@@ -613,7 +627,7 @@ async def _warm_up_card_once(
     """One attempt at one card. Returns True when the attempt was deferred, because the render slot or the render ran out
     of budget or the upload did, so the caller can try the card again later. Other failures are logged and skipped."""
     try:
-        await asyncio.wait_for(
+        admin_message_id = await asyncio.wait_for(
             _warm_up_one_card(
                 settings=settings,
                 bot=bot,
@@ -641,6 +655,10 @@ async def _warm_up_card_once(
             # would silently fail to commit for the rest of the run
             # (found live, 2026-08-19).
             await _safe_on_card_error(on_card_error, banner=banner, card_code=card.code)
+        return False
+    # Outside the card budget. The card is committed by now, so nothing in this delete can defer it again. A slow or failed
+    # delete only leaves the message in the admin chat.
+    await _delete_warmup_message(settings=settings, bot=bot, message_id=admin_message_id)
     return False
 
 
@@ -657,7 +675,9 @@ async def _safe_on_card_error(on_card_error, *, banner: str, card_code: str) -> 
 
 async def _warm_up_one_card(
     *, settings: Settings, bot: Bot, activity_repo, banner: str, card, on_card_done, release_connection=None
-) -> None:
+) -> int:
+    """Renders, uploads, caches and commits one card. Returns the admin message id, which the caller deletes once the card
+    budget no longer applies."""
     resolved = await resolve_gacha_reel_animation(
         settings=settings,
         activity_repo=activity_repo,
@@ -685,9 +705,7 @@ async def _warm_up_one_card(
         # separately safe on local disk regardless, but without this a
         # restart still re-uploads/re-sends every card processed so far.
         await on_card_done()
-    # Only after the commit. The delete is outside the upload budget and the transaction, so a slow or failed delete can
-    # neither roll back the cache write nor make Telegram receive the same file again.
-    await _delete_warmup_message(settings=settings, bot=bot, message_id=message_id)
+    return message_id
 
 
 async def _upload_warmup_animation(*, settings: Settings, bot: Bot, activity_repo, banner: str, card, resolved) -> int:
