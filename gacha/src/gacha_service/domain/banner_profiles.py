@@ -68,11 +68,13 @@ _ZZZ = BannerProfile(
         **RARITY_LABELS,
         CardRarity.legendary: "🟨 Агент S-ранга",
         CardRarity.epic: "🟪 Агент A-ранга",
+        CardRarity.mythic: "🟥 Особый агент",
     },
     rarity_summary_labels={
         **RARITY_SUMMARY_LABELS,
         CardRarity.legendary: "Агентов S-ранга",
         CardRarity.epic: "Агентов A-ранга",
+        CardRarity.mythic: "Особых агентов",
     },
 )
 

@@ -592,6 +592,16 @@
       "adventure_xp": 150,
       "image_url": "/images/zzz/komano.jpg",
       "weight": 6
+    },
+    {
+      "code": "pyrois",
+      "name": "Пироис (Pyrois)",
+      "rarity": "mythic",
+      "points": 20000,
+      "primogems": 44,
+      "adventure_xp": 440,
+      "image_url": "/images/zzz/pyrois.jpg",
+      "weight": 5
     }
   ]
 }

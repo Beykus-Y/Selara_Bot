@@ -317,7 +317,7 @@ if __name__ == "__main__":
 
 
 class TestZzzBannerConfig:
-    """Zenless Zone Zero banner: roster, odds mirror HSR, and artwork placeholder fallback."""
+    """Zenless Zone Zero banner: roster, odds mirror HSR (S/A) plus Genshin mythic (Pyrois), placeholder fallback."""
 
     @pytest.fixture
     def zzz_config(self):
@@ -333,14 +333,17 @@ class TestZzzBannerConfig:
         rarities = [card["rarity"] for card in zzz_config["cards"]]
         assert rarities.count("legendary") == 46
         assert rarities.count("epic") == 13
-        assert len(rarities) == 59
+        assert rarities.count("mythic") == 1
+        assert len(rarities) == 60
 
-    def test_zzz_i_rank_agent_is_not_in_banner(self, zzz_config):
-        names = {card["name"] for card in zzz_config["cards"]}
-        codes = {card["code"] for card in zzz_config["cards"]}
-        assert "Пироис (Pyrois)" not in names
-        assert "Пироис" not in names
-        assert "pyrois" not in codes
+    def test_zzz_pyrois_is_the_only_mythic_special_agent(self, zzz_config):
+        mythic = [card for card in zzz_config["cards"] if card["rarity"] == "mythic"]
+        assert [card["code"] for card in mythic] == ["pyrois"]
+        assert mythic[0]["name"] == "Пироис (Pyrois)"
+        assert mythic[0]["points"] == 20000
+        assert mythic[0]["primogems"] == 44
+        assert mythic[0]["adventure_xp"] == 440
+        assert mythic[0]["weight"] == 5
 
     def test_zzz_card_codes_are_unique(self, zzz_config):
         codes = [card["code"] for card in zzz_config["cards"]]
@@ -350,6 +353,7 @@ class TestZzzBannerConfig:
         expected = {
             "legendary": {"points": 11000, "primogems": 22, "adventure_xp": 200, "weight": 1},
             "epic": {"points": 5000, "primogems": 16, "adventure_xp": 150, "weight": 6},
+            "mythic": {"points": 20000, "primogems": 44, "adventure_xp": 440, "weight": 5},
         }
         for card in zzz_config["cards"]:
             values = expected[card["rarity"]]

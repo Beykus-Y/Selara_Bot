@@ -934,6 +934,7 @@ def test_zzz_profile_uses_zzz_terms_and_rarity_labels() -> None:
     assert profile.currency_label == "Полихромы"
     assert profile.rarity_labels[CardRarity.legendary] == "🟨 Агент S-ранга"
     assert profile.rarity_labels[CardRarity.epic] == "🟪 Агент A-ранга"
+    assert profile.rarity_labels[CardRarity.mythic] == "🟥 Особый агент"
     assert profile.shows_origin is False
     assert profile.duplicate_stage_prefix == "М"
     assert profile.progression_reward_label == "кинолента"
