@@ -610,8 +610,8 @@ async def test_shutdown_ends_the_animation_hold_and_still_delivers_the_pull_resu
 @pytest.mark.asyncio
 async def test_send_gacha_pull_ends_the_db_transaction_after_caching_the_animation(monkeypatch: pytest.MonkeyPatch) -> None:
     """The pooled connection must not sit in an open transaction through the
-    animation: the caller's session is committed before any render and again
-    right after the variant is cached."""
+    upload or the animation: the caller's session is committed before the
+    upload and again right after the variant is cached."""
     message = _DummyMessage()
     settings = SimpleNamespace(gacha_timeout_seconds=10.0)
     monkeypatch.setattr(text_commands, "_load_gacha_custom_emoji_catalog", lambda: {})
@@ -625,15 +625,25 @@ async def test_send_gacha_pull_ends_the_db_transaction_after_caching_the_animati
     resolved = SimpleNamespace(payload="fresh-bytes-payload", needs_caching=True, cache_version="v1")
     resolve_mock = AsyncMock(return_value=resolved)
     monkeypatch.setattr(text_commands, "resolve_gacha_reel_animation", resolve_mock)
-    monkeypatch.setattr(text_commands, "cache_reel_variant_after_send", AsyncMock())
+    events: list[str] = []
+    monkeypatch.setattr(
+        text_commands,
+        "cache_reel_variant_after_send",
+        AsyncMock(side_effect=lambda **_kwargs: events.append("cache")),
+    )
     monkeypatch.setattr(text_commands.asyncio, "sleep", AsyncMock())
 
     sent_message = SimpleNamespace(message_id=999, animation=SimpleNamespace(file_id="new-telegram-file-id"))
+
+    def record_upload(**_kwargs):
+        events.append("upload")
+        return sent_message
+
     bot = AsyncMock()
-    bot.send_animation = AsyncMock(return_value=sent_message)
+    bot.send_animation = AsyncMock(side_effect=record_upload)
     bot.delete_message = AsyncMock()
     activity_repo = SimpleNamespace(is_gacha_animation_enabled=AsyncMock(return_value=True))
-    db_session = SimpleNamespace(commit=AsyncMock())
+    db_session = SimpleNamespace(commit=AsyncMock(side_effect=lambda: events.append("commit")))
 
     await text_commands._send_gacha_pull(
         message, settings, bot, activity_repo, banner="genshin", db_session=db_session
@@ -641,5 +651,6 @@ async def test_send_gacha_pull_ends_the_db_transaction_after_caching_the_animati
     await _drain_gacha_background()
 
     assert resolve_mock.await_args.kwargs["release_connection"] is db_session.commit
-    assert db_session.commit.await_count == 1
+    # The transaction ends before the upload and again after the cache write.
+    assert events == ["commit", "upload", "cache", "commit"]
     assert len(message.photo_calls) == 1
