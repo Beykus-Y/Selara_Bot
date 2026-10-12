@@ -6,7 +6,7 @@ import logging
 import random
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -244,6 +244,12 @@ def _render_reel_in_worker(
         _render_slot.release()
 
 
+def _release_slot_if_cancelled(job: Future) -> None:
+    """A job cancelled before a worker picks it up never reaches the `finally` above, so the slot would stay taken."""
+    if job.cancelled():
+        _render_slot.release()
+
+
 async def _render_reel_gif(
     *,
     settings: Settings,
@@ -298,8 +304,7 @@ async def _render_reel_gif(
     }
     await _acquire_render_slot(wait=wait_for_slot)
     try:
-        future = asyncio.get_running_loop().run_in_executor(
-            _RENDER_EXECUTOR,
+        job = _RENDER_EXECUTOR.submit(
             partial(
                 _render_reel_in_worker,
                 build_kwargs=build_kwargs,
@@ -312,7 +317,8 @@ async def _render_reel_gif(
     except BaseException:
         _render_slot.release()
         raise
-    return await future
+    job.add_done_callback(_release_slot_if_cancelled)
+    return await asyncio.wrap_future(job)
 
 
 async def resolve_gacha_reel_animation(
