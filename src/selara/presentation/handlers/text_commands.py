@@ -5,6 +5,8 @@ import random
 import re
 import hashlib
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from os.path import basename
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -56,7 +58,7 @@ from selara.application.use_cases.gacha import (
 from selara.application.use_cases.economy.common import get_account_or_error, resolve_scope_or_error
 from selara.presentation.gacha_reel_orchestration import (
     cache_reel_variant_after_send,
-    is_gacha_animation_cache_ready,
+    ensure_gacha_reel_on_disk,
     resolve_gacha_reel_animation,
 )
 from selara.core.chat_settings import ChatSettings
@@ -156,6 +158,7 @@ from selara.presentation.handlers.stats import (
     should_include_hybrid_top_keyboard,
 )
 from selara.presentation.formatters import format_user_link, preferred_mention_label_from_parts
+from selara.presentation.cpu_executor import run_in_cpu_executor
 from selara.presentation.quote_card import build_quote_card
 from selara.presentation.handlers.settings_common import settings_to_dict
 from selara.presentation.db_recovery import safe_rollback
@@ -174,6 +177,14 @@ class _GachaMessageLockEntry:
 _GACHA_MESSAGE_LOCKS: dict[tuple[int, int], _GachaMessageLockEntry] = {}
 _GACHA_CALLBACK_IN_FLIGHT: set[tuple[int, int]] = set()
 _GACHA_TEXT_PULL_IN_FLIGHT: set[int] = set()
+# Fire-and-forget gacha tasks (animation tails, preparing notices), each kept alive until it ends.
+_GACHA_BACKGROUND_TASKS: set[asyncio.Task] = set()
+# Gacha update handlers still running. Shutdown waits for them, so a pull result that is being sent still goes out.
+_GACHA_PULL_HANDLER_TASKS: set[asyncio.Task] = set()
+# Set at shutdown so pending animation holds end early and their pull results still go out.
+_GACHA_SHUTDOWN = asyncio.Event()
+# Stays below docker-compose stop_grace_period (30 s), which also has to cover the cleanup after the drain.
+_GACHA_SHUTDOWN_DRAIN_SECONDS = 20.0
 
 
 def _gacha_message_lock_key(message: Message) -> tuple[int, int]:
@@ -2689,88 +2700,232 @@ async def _deliver_gacha_pull_response(message: Message, settings: Settings, *, 
 
 
 _GACHA_ANIMATION_HOLD_SECONDS = 12.0
-_GACHA_PREPARING_HOLD_SECONDS = 7.0
-_GACHA_PREPARING_TEXT = "🎬 Гача выполняет подготовку анимаций, попробуйте позже."
+_GACHA_RESTARTING_TEXT = "Бот перезапускается, попробуйте через минуту."
 
 
-async def _send_gacha_animation_preparing_notice(message: Message, bot: Bot) -> None:
-    """Self-deleting, unlike a normal `_answer_quiet` message — this can
-    fire on every pull while the cache is still warming up (see
-    docs/GACHA_MODERNIZATION_TODO.md, раздел 10), so leaving it in the chat
-    permanently would spam it."""
+def _spawn_gacha_background(coro) -> None:
+    """Holds a reference to a fire-and-forget task until it ends, so the event loop cannot drop it mid-flight."""
+    task = asyncio.create_task(coro)
+    _GACHA_BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_GACHA_BACKGROUND_TASKS.discard)
+
+
+def _spawn_gacha_reel_render(settings: Settings, *, banner: str, card) -> None:
+    """A card whose MP4 is not on disk yet is rendered in the background, so that a later pull of it can carry the
+    animation. The pull that asked for it is not held up by the render."""
+    if _GACHA_SHUTDOWN.is_set():
+        return
+    _spawn_gacha_background(
+        ensure_gacha_reel_on_disk(
+            settings=settings,
+            banner=banner,
+            landing_card_code=card.code,
+            landing_card_name=card.name,
+            landing_rarity=card.rarity,
+            landing_rarity_label=card.rarity_label,
+        )
+    )
+
+
+async def _hold_gacha_animation() -> None:
+    """Holds the animation for its duration, or less once shutdown has started."""
+    hold = asyncio.ensure_future(asyncio.sleep(_GACHA_ANIMATION_HOLD_SECONDS))
+    shutdown = asyncio.ensure_future(_GACHA_SHUTDOWN.wait())
     try:
-        kwargs: dict = {}
-        if message.chat.type in {"group", "supergroup"}:
-            kwargs["disable_notification"] = True
-        sent = await message.answer(_GACHA_PREPARING_TEXT, **kwargs)
-        await asyncio.sleep(_GACHA_PREPARING_HOLD_SECONDS)
-        try:
-            await bot.delete_message(chat_id=message.chat.id, message_id=sent.message_id)
-        except TelegramBadRequest:
-            pass
+        await asyncio.wait({hold, shutdown}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        hold.cancel()
+        shutdown.cancel()
+
+
+@contextmanager
+def _tracked_gacha_pull_handler() -> Iterator[None]:
+    """Keeps the update handler that runs a gacha action in _GACHA_PULL_HANDLER_TASKS until the handler returns."""
+    task = asyncio.current_task()
+    _GACHA_PULL_HANDLER_TASKS.add(task)
+    try:
+        yield
+    finally:
+        _GACHA_PULL_HANDLER_TASKS.discard(task)
+
+
+async def drain_gacha_background_tasks(timeout: float = _GACHA_SHUTDOWN_DRAIN_SECONDS) -> None:
+    """Shutdown: end the animation holds early and wait, at most `timeout` seconds, until no gacha handler or background
+    task is left. A handler can hand its tail to a background task while the drain waits, so both sets are read again
+    after every wait. A pull is already committed when its hold starts, so a restart during the hold must still deliver
+    its result."""
+    _GACHA_SHUTDOWN.set()
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        pending = _GACHA_BACKGROUND_TASKS | _GACHA_PULL_HANDLER_TASKS
+        if not pending:
+            return
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            logger.warning("Gacha shutdown drain ended with %d task(s) still running", len(pending))
+            return
+        await asyncio.wait(pending, timeout=remaining)
+
+
+async def _delete_gacha_animation(bot: Bot, message: Message, sent) -> None:
+    try:
+        await bot.delete_message(chat_id=message.chat.id, message_id=sent.message_id)
+    except TelegramBadRequest:
+        pass
+
+
+async def _end_pull_transaction(release_connection) -> None:
+    if release_connection is None:
+        return
+    try:
+        await release_connection()
     except Exception:
-        logger.warning("Gacha preparing notice send/delete failed", exc_info=True)
+        logger.warning("Gacha pull: could not end the database transaction", exc_info=True)
 
 
-async def _try_send_gacha_pull_animation(
-    message: Message, settings: Settings, bot: Bot, activity_repo, *, banner: str, response
-) -> None:
+async def _send_gacha_pull_animation(
+    message: Message,
+    settings: Settings,
+    bot: Bot,
+    activity_repo,
+    *,
+    banner: str,
+    response,
+    release_connection=None,
+):
     """Best-effort: the result is already computed and passed in via
     `response` — this only decides how to *reveal* it. Any failure here
-    (Telegram, HTTP fetch, rendering) must fall through silently so the
-    caller still delivers the real result (see docs/GACHA_MODERNIZATION_TODO.md,
-    Этап 3, hard constraints)."""
+    (Telegram, HTTP fetch) must fall through silently so the caller still
+    delivers the real result (see docs/GACHA_MODERNIZATION_TODO.md, Этап 3,
+    hard constraints). Returns the animation message, which the caller holds
+    and deletes, or None when no animation went out.
+
+    Only cached animations are sent here, never a render. A card whose MP4 is
+    not on disk yet is rendered in the background for a later pull, so the
+    instant result is not held up by a render.
+
+    `release_connection` ends the caller's transaction before the upload and
+    again after the cache write, so no pooled connection sits idle while the
+    animation is shown. It also ends the transaction on every path that sends
+    no animation, so the instant result does not hold one either."""
+    if _GACHA_SHUTDOWN.is_set():
+        # Shutdown has started. A render would outlast the drain, so the instant result goes out without an animation.
+        await _end_pull_transaction(release_connection)
+        return None
+    card = response.card
     try:
         resolved = await resolve_gacha_reel_animation(
             settings=settings,
             activity_repo=activity_repo,
             banner=banner,
-            landing_card_code=response.card.code,
-            landing_card_name=response.card.name,
-            landing_rarity=response.card.rarity,
-            landing_rarity_label=response.card.rarity_label,
+            landing_card_code=card.code,
+            landing_card_name=card.name,
+            landing_rarity=card.rarity,
+            landing_rarity_label=card.rarity_label,
+            allow_render=False,
         )
+        if resolved is None or not resolved.needs_caching:
+            _spawn_gacha_reel_render(settings, banner=banner, card=card)
+        if resolved is None:
+            await _end_pull_transaction(release_connection)
+            return None
+        # The upload can take a few seconds. Ending the transaction first keeps the connection from sitting idle in it.
+        await _end_pull_transaction(release_connection)
         try:
             sent = await bot.send_animation(chat_id=message.chat.id, animation=resolved.payload)
         except TelegramBadRequest:
             if not isinstance(resolved.payload, str):
                 raise
-            # A stored file_id can go stale server-side — retrying it would
-            # just fail again, so force the local-disk/render tiers instead.
+            # A stored file_id can go stale server-side — retrying it would just fail again, so only a copy on disk can
+            # serve this pull now. Without one, the card is rendered in the background like any other uncached card.
             resolved = await resolve_gacha_reel_animation(
                 settings=settings,
                 activity_repo=activity_repo,
                 banner=banner,
-                landing_card_code=response.card.code,
-                landing_card_name=response.card.name,
-                landing_rarity=response.card.rarity,
-                landing_rarity_label=response.card.rarity_label,
+                landing_card_code=card.code,
+                landing_card_name=card.name,
+                landing_rarity=card.rarity,
+                landing_rarity_label=card.rarity_label,
                 skip_cached_lookup=True,
+                allow_render=False,
             )
+            if resolved is None:
+                _spawn_gacha_reel_render(settings, banner=banner, card=card)
+                return None
             sent = await bot.send_animation(chat_id=message.chat.id, animation=resolved.payload)
         if resolved.needs_caching and getattr(sent, "animation", None) is not None:
             await cache_reel_variant_after_send(
                 activity_repo=activity_repo,
                 banner=banner,
-                card_code=response.card.code,
+                card_code=card.code,
                 telegram_file_id=sent.animation.file_id,
                 cache_version=resolved.cache_version,
             )
-        await asyncio.sleep(_GACHA_ANIMATION_HOLD_SECONDS)
-        try:
-            await bot.delete_message(chat_id=message.chat.id, message_id=sent.message_id)
-        except TelegramBadRequest:
-            pass
     except Exception:
         logger.warning(
             "Gacha reel animation failed, falling back to instant result",
             extra={"chat_id": getattr(message.chat, "id", None), "banner": banner},
             exc_info=True,
         )
+        await _end_pull_transaction(release_connection)
+        return None
+    await _end_pull_transaction(release_connection)
+    return sent
+
+
+async def _try_send_gacha_pull_animation(
+    message: Message, settings: Settings, bot: Bot, activity_repo, *, banner: str, response, release_connection=None
+) -> None:
+    """Callback path: the animation is shown inline, held, and then deleted. The text command path does this in the background instead."""
+    sent = await _send_gacha_pull_animation(
+        message, settings, bot, activity_repo, banner=banner, response=response, release_connection=release_connection
+    )
+    if sent is None:
+        return
+    try:
+        await _hold_gacha_animation()
+        await _delete_gacha_animation(bot, message, sent)
+    except Exception:
+        logger.warning(
+            "Gacha reel animation hold failed",
+            extra={"chat_id": getattr(message.chat, "id", None), "banner": banner},
+            exc_info=True,
+        )
+
+
+async def _finish_gacha_pull_after_animation(
+    message: Message, settings: Settings, bot: Bot, *, banner: str, response, owner_user_id: int, sent
+) -> None:
+    """Background tail of a text pull: the animation plays for its hold, is
+    deleted, and then the real result follows, as before. Running after the
+    update returns means no pooled connection and no admission slot is held
+    during the hold. The in-flight marker stays set until the result is out,
+    so the same user cannot start a second pull meanwhile."""
+    try:
+        await _hold_gacha_animation()
+        try:
+            await _delete_gacha_animation(bot, message, sent)
+        except Exception:
+            logger.warning("Gacha reel animation could not be deleted", exc_info=True)
+        await _deliver_gacha_pull_response(
+            message, settings, banner=banner, response=response, owner_user_id=owner_user_id
+        )
+    except Exception:
+        logger.warning("Gacha pull result failed after its animation", exc_info=True)
+    finally:
+        _GACHA_TEXT_PULL_IN_FLIGHT.discard(owner_user_id)
 
 
 async def _send_gacha_pull(
-    message: Message, settings: Settings, bot: Bot, activity_repo, *, banner: str, session_factory=None
+    message: Message,
+    settings: Settings,
+    bot: Bot,
+    activity_repo,
+    *,
+    banner: str,
+    session_factory=None,
+    db_session=None,
 ) -> None:
     if message.from_user is None:
         return
@@ -2780,17 +2935,39 @@ async def _send_gacha_pull(
         await _answer_quiet(message, "Запрос уже обрабатывается, подождите.")
         return
     _GACHA_TEXT_PULL_IN_FLIGHT.add(user_id)
+    handed_off = False
     try:
-        await _send_gacha_pull_impl(
-            message, settings, bot, activity_repo, banner=banner, session_factory=session_factory
-        )
+        with _tracked_gacha_pull_handler():
+            handed_off = await _send_gacha_pull_impl(
+                message,
+                settings,
+                bot,
+                activity_repo,
+                banner=banner,
+                session_factory=session_factory,
+                db_session=db_session,
+            )
     finally:
-        _GACHA_TEXT_PULL_IN_FLIGHT.discard(user_id)
+        # A background tail that is still holding the animation keeps the marker until it has delivered the result.
+        if not handed_off:
+            _GACHA_TEXT_PULL_IN_FLIGHT.discard(user_id)
 
 
 async def _send_gacha_pull_impl(
-    message: Message, settings: Settings, bot: Bot, activity_repo, *, banner: str, session_factory=None
-) -> None:
+    message: Message,
+    settings: Settings,
+    bot: Bot,
+    activity_repo,
+    *,
+    banner: str,
+    session_factory=None,
+    db_session=None,
+) -> bool:
+    """Returns True when a background task now owns the pull's in-flight marker."""
+    if _GACHA_SHUTDOWN.is_set():
+        # Refused before pull_gacha_card charges, so a restart cannot leave a charged pull without its result.
+        await _answer_quiet(message, _GACHA_RESTARTING_TEXT)
+        return False
     try:
         response = await pull_gacha_card(
             settings,
@@ -2802,33 +2979,43 @@ async def _send_gacha_pull_impl(
         if exc.is_operational:
             await notify_operational_error(session_factory=session_factory, event=message, exc=exc, bot=bot)
         await _answer_quiet(message, exc.message)
-        return
+        return False
 
     try:
         animation_wanted = response.card is not None and await activity_repo.is_gacha_animation_enabled(
             user_id=message.from_user.id
         )
-        cache_ready = animation_wanted and await is_gacha_animation_cache_ready(
-            settings, activity_repo, banner=banner
-        )
     except Exception:
-        # is_gacha_animation_cache_ready calls out to the gacha service over
-        # the network — if that fails, the already-computed result below
-        # must still reach the user (pre-deploy audit finding, 2026-08-19:
-        # this was previously unguarded and could silently lose the pull).
-        logger.warning("Gacha animation readiness check failed, delivering classic result", exc_info=True)
+        # The already-computed result below must still reach the user if the preference lookup fails (pre-deploy audit
+        # finding, 2026-08-19: this was previously unguarded and could silently lose the pull).
+        logger.warning("Gacha animation preference check failed, delivering classic result", exc_info=True)
         animation_wanted = False
-        cache_ready = False
 
+    # The upload and the hold must not keep this update's pooled connection, so the transaction ends before them.
+    release_connection = db_session.commit if db_session is not None else None
     if animation_wanted:
-        if cache_ready:
-            await _try_send_gacha_pull_animation(message, settings, bot, activity_repo, banner=banner, response=response)
-        else:
-            # Fire-and-forget: unlike the animation (which the user is
-            # meant to watch for its hold duration), this notice has
-            # nothing worth waiting for — the real result must not be
-            # delayed just so a throwaway notice can self-delete on time.
-            asyncio.create_task(_send_gacha_animation_preparing_notice(message, bot))
+        sent = await _send_gacha_pull_animation(
+            message,
+            settings,
+            bot,
+            activity_repo,
+            banner=banner,
+            response=response,
+            release_connection=release_connection,
+        )
+        if sent is not None:
+            _spawn_gacha_background(
+                _finish_gacha_pull_after_animation(
+                    message,
+                    settings,
+                    bot,
+                    banner=banner,
+                    response=response,
+                    owner_user_id=message.from_user.id,
+                    sent=sent,
+                )
+            )
+            return True
 
     await _deliver_gacha_pull_response(
         message,
@@ -2837,6 +3024,7 @@ async def _send_gacha_pull_impl(
         response=response,
         owner_user_id=message.from_user.id,
     )
+    return False
 
 
 async def _send_gacha_profile(message: Message, settings: Settings, *, banner: str, session_factory=None) -> None:
@@ -4363,7 +4551,8 @@ async def _send_quote_card(message: Message, bot: Bot, settings: Settings) -> No
     avatar_bytes = await _download_telegram_avatar(bot, user_id=author.id)
 
     try:
-        rendered = build_quote_card(
+        rendered = await run_in_cpu_executor(
+            build_quote_card,
             author_name=author_name,
             quote_text=quote_text,
             date_label=_quote_date_label(reply.date, timezone_name=settings.bot_timezone),
@@ -5443,6 +5632,7 @@ async def gacha_callback(
     activity_repo,
     chat_settings: ChatSettings,
     session_factory=None,
+    db_session=None,
 ) -> None:
     if query.message is None:
         await _gacha_callback_impl(
@@ -5453,6 +5643,7 @@ async def gacha_callback(
             activity_repo=activity_repo,
             chat_settings=chat_settings,
             session_factory=session_factory,
+            db_session=db_session,
         )
         return
 
@@ -5463,15 +5654,17 @@ async def gacha_callback(
 
     _GACHA_CALLBACK_IN_FLIGHT.add(lock_key)
     try:
-        await _gacha_callback_impl(
-            query,
-            bot=bot,
-            settings=settings,
-            economy_repo=economy_repo,
-            activity_repo=activity_repo,
-            chat_settings=chat_settings,
-            session_factory=session_factory,
-        )
+        with _tracked_gacha_pull_handler():
+            await _gacha_callback_impl(
+                query,
+                bot=bot,
+                settings=settings,
+                economy_repo=economy_repo,
+                activity_repo=activity_repo,
+                chat_settings=chat_settings,
+                session_factory=session_factory,
+                db_session=db_session,
+            )
     finally:
         _GACHA_CALLBACK_IN_FLIGHT.discard(lock_key)
 
@@ -5485,6 +5678,7 @@ async def _gacha_callback_impl(
     activity_repo,
     chat_settings: ChatSettings,
     session_factory=None,
+    db_session=None,
 ) -> None:
     action, banner, pull_id, owner_user_id, currency_amount = _parse_gacha_callback_data(query.data)
     if action is None or banner is None or owner_user_id is None:
@@ -5508,6 +5702,10 @@ async def _gacha_callback_impl(
     economy_chat_id = _gacha_economy_chat_id(chat_type=query.message.chat.type, chat_id=query.message.chat.id)
 
     if action == "buy":
+        if _GACHA_SHUTDOWN.is_set():
+            # Refused before purchase_gacha_pull charges, so a restart cannot leave a charged pull without its result.
+            await _safe_callback_answer(query, _GACHA_RESTARTING_TEXT, show_alert=True)
+            return
         try:
             response = await purchase_gacha_pull(
                 settings,
@@ -5527,19 +5725,23 @@ async def _gacha_callback_impl(
             animation_wanted = response.card is not None and await activity_repo.is_gacha_animation_enabled(
                 user_id=query.from_user.id
             )
-            cache_ready = animation_wanted and await is_gacha_animation_cache_ready(
-                settings, activity_repo, banner=banner
-            )
         except Exception:
-            logger.warning("Gacha animation readiness check failed, delivering classic result", exc_info=True)
+            logger.warning("Gacha animation preference check failed, delivering classic result", exc_info=True)
             animation_wanted = False
-            cache_ready = False
 
-        # The pull is already charged at this point, so a cold animation cache must not
-        # tell the user to retry; the classic result below is delivered instead.
-        if animation_wanted and cache_ready:
+        # The pull is already charged at this point, so a card without a cached animation must not tell the user to
+        # retry; the classic result below is delivered instead.
+        # The hold must not keep this update's pooled connection, so the transaction ends before the upload.
+        release_connection = db_session.commit if db_session is not None else None
+        if animation_wanted:
             await _try_send_gacha_pull_animation(
-                query.message, settings, bot, activity_repo, banner=banner, response=response
+                query.message,
+                settings,
+                bot,
+                activity_repo,
+                banner=banner,
+                response=response,
+                release_connection=release_connection,
             )
 
         await _deliver_gacha_pull_response(
@@ -6320,6 +6522,7 @@ async def text_commands_handler(
             activity_repo,
             banner=str(intent.args.get("banner", "")),
             session_factory=session_factory,
+            db_session=db_session,
         )
         return
 

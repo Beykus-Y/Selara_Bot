@@ -62,7 +62,7 @@ _ZZZ = BannerProfile(
     duplicate_stage_prefix="М",
     shows_origin=False,
     profile_heading="⚡ Zenless Zone Zero",
-    profile_rank_label="Уровень",
+    profile_rank_label="Уровень Интернота",
     profile_currency_label="Полихромы",
     rarity_labels={
         **RARITY_LABELS,

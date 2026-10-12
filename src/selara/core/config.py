@@ -38,6 +38,17 @@ class Settings(BaseSettings):
     error_alert_chat_id: int | None = Field(default=None, validation_alias="ERROR_ALERT_CHAT_ID")
     db_pool_size: int = Field(default=10, validation_alias="DB_POOL_SIZE")
     db_max_overflow: int = Field(default=20, validation_alias="DB_MAX_OVERFLOW")
+    # Pool waits and connect/command timeouts bound how long one stalled operation can hold a pool slot.
+    db_pool_timeout_seconds: float = Field(default=30.0, validation_alias="DB_POOL_TIMEOUT_SECONDS", gt=0)
+    db_connect_timeout_seconds: float = Field(default=10.0, validation_alias="DB_CONNECT_TIMEOUT_SECONDS", gt=0)
+    db_command_timeout_seconds: float = Field(default=120.0, validation_alias="DB_COMMAND_TIMEOUT_SECONDS", gt=0)
+    # Updates that may hold a pooled connection at once. Kept below pool capacity so a burst waits in memory.
+    db_max_concurrent_updates: int = Field(default=20, validation_alias="DB_MAX_CONCURRENT_UPDATES", ge=1)
+    # Telegram updates handled at once. Updates beyond this wait at Telegram instead of piling up in memory.
+    telegram_update_concurrency_limit: int = Field(default=40, validation_alias="TELEGRAM_UPDATE_CONCURRENCY_LIMIT", ge=1)
+    # Ordinary updates admitted at once, running or waiting for a slot. Past this, new ordinary updates are dropped and
+    # counted. Payment updates are never dropped. Each one costs a few KB, so the default stays around 10-20 MB.
+    telegram_pending_updates_limit: int = Field(default=2000, validation_alias="TELEGRAM_PENDING_UPDATES_LIMIT", ge=1)
     redis_url: str = Field(default="redis://localhost:6379/0", validation_alias="REDIS_URL")
     game_state_ttl_hours: int = Field(default=24, validation_alias="GAME_STATE_TTL_HOURS")
     activity_batch_flush_seconds: int = Field(default=5, validation_alias="ACTIVITY_BATCH_FLUSH_SECONDS")
@@ -125,6 +136,10 @@ class Settings(BaseSettings):
     gacha_admin_token: str = Field(default="", validation_alias="GACHA_ADMIN_TOKEN")
     gacha_service_token: str = Field(default="", validation_alias="GACHA_SERVICE_TOKEN")
     gacha_reel_cache_dir: str = Field(default="var/gacha_reel_cache", validation_alias="GACHA_REEL_CACHE_DIR")
+    # Off by default: the startup warmup renders every card's reel, and that memory peak is what OOM-killed the container.
+    gacha_warmup_enabled: bool = Field(default=False, validation_alias="GACHA_WARMUP_ENABLED")
+    # Budget for one headless-Chromium HTML render (family tree image); a render past it fails with a user-facing reply.
+    render_timeout_seconds: float = Field(default=15.0, ge=1.0, le=120.0, validation_alias="RENDER_TIMEOUT_SECONDS")
     backup_timeout_seconds: float = Field(default=300.0, validation_alias="BACKUP_TIMEOUT_SECONDS")
     backup_pg_dump_timeout_seconds: float = Field(default=1800.0, validation_alias="BACKUP_PG_DUMP_TIMEOUT_SECONDS")
     backup_pg_dump_path: str = Field(default="pg_dump", validation_alias="BACKUP_PG_DUMP_PATH")

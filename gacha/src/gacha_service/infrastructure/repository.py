@@ -11,6 +11,7 @@ from gacha_service.domain.models import GachaCard, PlayerState, resolve_rank
 from gacha_service.infrastructure.models import (
     CurrencyGrantModel,
     PlayerBannerCooldownModel,
+    PlayerBannerStatsModel,
     PlayerBannerWalletModel,
     PlayerCardCollectionModel,
     PlayerModel,
@@ -29,13 +30,22 @@ def _coerce_utc_datetime(value: datetime | None) -> datetime | None:
     return value.astimezone(UTC)
 
 
-def _to_player_state(model: PlayerModel, *, total_primogems_override: int | None = None) -> PlayerState:
+def _to_player_state(
+    model: PlayerModel,
+    *,
+    total_primogems_override: int | None = None,
+    banner_totals: tuple[int, int] | None = None,
+) -> PlayerState:
+    """Build PlayerState; `banner_totals` = (points, adventure_xp) of one banner, else the shared legacy totals."""
+    total_points, adventure_xp = (
+        (int(model.total_points), int(model.adventure_xp)) if banner_totals is None else banner_totals
+    )
     return PlayerState(
         user_id=model.user_id,
         username=model.username,
-        adventure_rank=model.adventure_rank,
-        adventure_xp=model.adventure_xp,
-        total_points=model.total_points,
+        adventure_rank=resolve_rank(adventure_xp)[0],
+        adventure_xp=adventure_xp,
+        total_points=total_points,
         total_primogems=model.total_primogems if total_primogems_override is None else total_primogems_override,
         next_pull_at=_coerce_utc_datetime(model.next_pull_at),
     )
@@ -83,10 +93,7 @@ class GachaRepository:
             player.username = username
             await self._session.flush()
 
-        return _to_player_state(
-            player,
-            total_primogems_override=await self.get_banner_currency_balance(user_id=user_id, banner=banner),
-        )
+        return await self._banner_player_state(player, user_id=user_id, banner=banner)
 
     async def adjust_banner_currency(
         self,
@@ -163,7 +170,9 @@ class GachaRepository:
 
         await self._session.commit()
         await self._session.refresh(player)
-        return _to_player_state(player, total_primogems_override=int(wallet.currency_balance))
+        return await self._banner_player_state(
+            player, user_id=user_id, banner=banner, total_primogems=int(wallet.currency_balance)
+        )
 
     async def get_banner_cooldown(self, *, user_id: int, banner: str) -> datetime | None:
         cooldown = await self._session.get(
@@ -193,6 +202,48 @@ class GachaRepository:
         await self._session.commit()
         return True
 
+    async def _get_banner_totals(self, *, user_id: int, banner: str) -> tuple[int, int]:
+        stats = await self._session.get(
+            PlayerBannerStatsModel,
+            {
+                "user_id": user_id,
+                "banner": banner,
+            },
+        )
+        if stats is None:
+            return 0, 0
+        return int(stats.total_points), int(stats.adventure_xp)
+
+    async def _get_or_create_banner_stats(self, *, user_id: int, banner: str) -> PlayerBannerStatsModel:
+        stats = await self._session.get(
+            PlayerBannerStatsModel,
+            {
+                "user_id": user_id,
+                "banner": banner,
+            },
+        )
+        if stats is None:
+            stats = PlayerBannerStatsModel(user_id=user_id, banner=banner, total_points=0, adventure_xp=0)
+            self._session.add(stats)
+            await self._session.flush()
+        return stats
+
+    async def _banner_player_state(
+        self,
+        player: PlayerModel,
+        *,
+        user_id: int,
+        banner: str,
+        total_primogems: int | None = None,
+    ) -> PlayerState:
+        if total_primogems is None:
+            total_primogems = await self.get_banner_currency_balance(user_id=user_id, banner=banner)
+        return _to_player_state(
+            player,
+            total_primogems_override=total_primogems,
+            banner_totals=await self._get_banner_totals(user_id=user_id, banner=banner),
+        )
+
     async def get_banner_currency_balance(self, *, user_id: int, banner: str) -> int:
         wallet = await self._session.get(
             PlayerBannerWalletModel,
@@ -211,10 +262,7 @@ class GachaRepository:
             return None
         if banner is None:
             return _to_player_state(player)
-        return _to_player_state(
-            player,
-            total_primogems_override=await self.get_banner_currency_balance(user_id=user_id, banner=banner),
-        )
+        return await self._banner_player_state(player, user_id=user_id, banner=banner)
 
     async def get_or_create_player(self, *, user_id: int, username: str | None, banner: str | None = None) -> PlayerState:
         player = await self._session.get(PlayerModel, user_id)
@@ -233,10 +281,7 @@ class GachaRepository:
             await self._session.refresh(player)
             if banner is None:
                 return _to_player_state(player)
-            return _to_player_state(
-                player,
-                total_primogems_override=await self.get_banner_currency_balance(user_id=user_id, banner=banner),
-            )
+            return await self._banner_player_state(player, user_id=user_id, banner=banner)
 
         if username is not None and username != player.username:
             player.username = username
@@ -244,10 +289,7 @@ class GachaRepository:
             await self._session.refresh(player)
         if banner is None:
             return _to_player_state(player)
-        return _to_player_state(
-            player,
-            total_primogems_override=await self.get_banner_currency_balance(user_id=user_id, banner=banner),
-        )
+        return await self._banner_player_state(player, user_id=user_id, banner=banner)
 
     async def apply_pull(
         self,
@@ -276,6 +318,9 @@ class GachaRepository:
         player.total_points += card.points
         player.adventure_xp += adventure_xp_gained
         player.adventure_rank = resolve_rank(player.adventure_xp)[0]
+        banner_stats = await self._get_or_create_banner_stats(user_id=user_id, banner=card.banner)
+        banner_stats.total_points += card.points
+        banner_stats.adventure_xp += adventure_xp_gained
         if update_cooldown:
             player.next_pull_at = next_pull_at
 
@@ -362,7 +407,9 @@ class GachaRepository:
         await self._session.commit()
         await self._session.refresh(player)
         return (
-            _to_player_state(player, total_primogems_override=int(wallet.currency_balance)),
+            await self._banner_player_state(
+                player, user_id=user_id, banner=card.banner, total_primogems=int(wallet.currency_balance)
+            ),
             int(collection_entry.copies_owned),
             int(history_entry.id),
         )
@@ -431,7 +478,9 @@ class GachaRepository:
         await self._session.commit()
         await self._session.refresh(player)
         return (
-            _to_player_state(player, total_primogems_override=int(wallet.currency_balance)),
+            await self._banner_player_state(
+                player, user_id=user_id, banner=banner, total_primogems=int(wallet.currency_balance)
+            ),
             sale_price,
             banner,
             sold_at,

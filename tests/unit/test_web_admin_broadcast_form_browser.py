@@ -347,6 +347,44 @@ async def test_server_admin_broadcast_server_error_binds_to_message_block_and_ke
 
 
 @pytest.mark.asyncio
+async def test_server_admin_broadcast_proxy_413_shows_photo_size_error_on_media_block() -> None:
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        page = await browser.new_page()
+        try:
+            await _goto_admin_page(page)
+            await page.add_script_tag(path=str(STATIC_DIR / "admin-broadcast.js"), type="module")
+            form = page.locator("[data-broadcast-form]")
+            submit = form.locator("[data-broadcast-submit]")
+            dialog = form.locator("[data-broadcast-confirm-dialog]")
+            await form.locator("[data-broadcast-body]").fill("Фото с большим файлом")
+            await form.locator('input[name="media_mode"][value="photo"]').check()
+            await form.evaluate("form => { form.noValidate = true; }")
+
+            async def handle_send(route):
+                # nginx answers an oversized body with its own HTML page, never with the app's JSON.
+                await route.fulfill(
+                    status=413,
+                    content_type="text/html",
+                    body="<html><head><title>413 Request Entity Too Large</title></head><body>413</body></html>",
+                )
+
+            await page.route("**/api/admin/broadcasts/send", handle_send)
+
+            await submit.click()
+            await dialog.locator("[data-broadcast-confirm-submit]").click()
+
+            media_error = form.locator("[data-broadcast-media-error]")
+            await media_error.wait_for(state="visible")
+            assert await media_error.inner_text() == (
+                "Фото превышает допустимый размер на сервере (до 10 МБ). Рассылка не создана."
+            )
+            assert await form.locator("[data-broadcast-form-error]").is_hidden()
+        finally:
+            await browser.close()
+
+
+@pytest.mark.asyncio
 async def test_server_admin_broadcast_server_error_binds_to_media_block() -> None:
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True)

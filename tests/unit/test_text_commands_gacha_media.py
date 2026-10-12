@@ -10,6 +10,14 @@ from aiogram.types import BufferedInputFile
 from selara.presentation.handlers import text_commands
 
 
+@pytest.fixture(autouse=True)
+def _no_background_reel_render(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """A pull whose card has no MP4 yet starts a background render. These tests stub it out and check the call."""
+    render = AsyncMock()
+    monkeypatch.setattr(text_commands, "ensure_gacha_reel_on_disk", render)
+    return render
+
+
 class _DummyMessage:
     def __init__(self) -> None:
         self.chat = SimpleNamespace(type="group", id=-100123, title="Test chat")
@@ -190,6 +198,12 @@ def _gacha_pull_response_with_card() -> SimpleNamespace:
     )
 
 
+async def _drain_gacha_background() -> None:
+    """The animation hold, its deletion and the result run as background tasks after the pull returns."""
+    while text_commands._GACHA_BACKGROUND_TASKS:
+        await asyncio.gather(*list(text_commands._GACHA_BACKGROUND_TASKS), return_exceptions=True)
+
+
 @pytest.mark.asyncio
 async def test_send_gacha_pull_sends_animation_first_when_enabled_and_caches_new_variant(
     monkeypatch: pytest.MonkeyPatch,
@@ -202,7 +216,6 @@ async def test_send_gacha_pull_sends_animation_first_when_enabled_and_caches_new
     settings = SimpleNamespace(gacha_timeout_seconds=10.0)
     monkeypatch.setattr(text_commands, "_load_gacha_custom_emoji_catalog", lambda: {})
     monkeypatch.setattr(text_commands, "pull_gacha_card", AsyncMock(return_value=_gacha_pull_response_with_card()))
-    monkeypatch.setattr(text_commands, "is_gacha_animation_cache_ready", AsyncMock(return_value=True))
     monkeypatch.setattr(
         text_commands,
         "_fetch_gacha_image_file",
@@ -221,6 +234,7 @@ async def test_send_gacha_pull_sends_animation_first_when_enabled_and_caches_new
     activity_repo = SimpleNamespace(is_gacha_animation_enabled=AsyncMock(return_value=True))
 
     await text_commands._send_gacha_pull(message, settings, bot, activity_repo, banner="genshin")
+    await _drain_gacha_background()
 
     bot.send_animation.assert_awaited_once()
     assert bot.send_animation.await_args.kwargs["animation"] == "fresh-bytes-payload"
@@ -248,7 +262,6 @@ async def test_send_gacha_pull_retries_via_local_or_render_when_stored_file_id_s
     settings = SimpleNamespace(gacha_timeout_seconds=10.0)
     monkeypatch.setattr(text_commands, "_load_gacha_custom_emoji_catalog", lambda: {})
     monkeypatch.setattr(text_commands, "pull_gacha_card", AsyncMock(return_value=_gacha_pull_response_with_card()))
-    monkeypatch.setattr(text_commands, "is_gacha_animation_cache_ready", AsyncMock(return_value=True))
     monkeypatch.setattr(
         text_commands, "_fetch_gacha_image_file", AsyncMock(return_value=BufferedInputFile(b"x", filename="a.jpg"))
     )
@@ -267,6 +280,7 @@ async def test_send_gacha_pull_retries_via_local_or_render_when_stored_file_id_s
     activity_repo = SimpleNamespace(is_gacha_animation_enabled=AsyncMock(return_value=True))
 
     await text_commands._send_gacha_pull(message, settings, bot, activity_repo, banner="genshin")
+    await _drain_gacha_background()
 
     assert bot.send_animation.await_count == 2
     assert resolve_mock.await_args_list[1].kwargs["skip_cached_lookup"] is True
@@ -286,7 +300,6 @@ async def test_send_gacha_pull_reuses_cached_variant_without_recaching(monkeypat
     settings = SimpleNamespace(gacha_timeout_seconds=10.0)
     monkeypatch.setattr(text_commands, "_load_gacha_custom_emoji_catalog", lambda: {})
     monkeypatch.setattr(text_commands, "pull_gacha_card", AsyncMock(return_value=_gacha_pull_response_with_card()))
-    monkeypatch.setattr(text_commands, "is_gacha_animation_cache_ready", AsyncMock(return_value=True))
     monkeypatch.setattr(
         text_commands, "_fetch_gacha_image_file", AsyncMock(return_value=BufferedInputFile(b"x", filename="a.jpg"))
     )
@@ -301,19 +314,19 @@ async def test_send_gacha_pull_reuses_cached_variant_without_recaching(monkeypat
     activity_repo = SimpleNamespace(is_gacha_animation_enabled=AsyncMock(return_value=True))
 
     await text_commands._send_gacha_pull(message, settings, bot, activity_repo, banner="genshin")
+    await _drain_gacha_background()
 
     bot.send_animation.assert_awaited_once()
     cache_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_send_gacha_pull_shows_preparing_message_when_cache_not_ready(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_send_gacha_pull_without_cached_animation_delivers_result_and_renders_in_background(
+    monkeypatch: pytest.MonkeyPatch, _no_background_reel_render: AsyncMock
 ) -> None:
-    """docs/GACHA_MODERNIZATION_TODO.md, раздел 10: while the animation
-    cache isn't warm yet (fresh deploy), don't attempt a live render at
-    all — tell the user to try later. The real pull result must still
-    arrive normally, just without the animation."""
+    """docs/GACHA_MODERNIZATION_TODO.md, раздел 10: a card without an MP4 yet gets no animation and no "preparing" notice.
+    The pull never renders inside its own handler. The card is rendered in the background for the next pull, and the real
+    result arrives normally."""
     message = _DummyMessage()
     settings = SimpleNamespace(gacha_timeout_seconds=10.0)
     monkeypatch.setattr(text_commands, "_load_gacha_custom_emoji_catalog", lambda: {})
@@ -321,39 +334,29 @@ async def test_send_gacha_pull_shows_preparing_message_when_cache_not_ready(
     monkeypatch.setattr(
         text_commands, "_fetch_gacha_image_file", AsyncMock(return_value=BufferedInputFile(b"x", filename="a.jpg"))
     )
-    monkeypatch.setattr(text_commands, "is_gacha_animation_cache_ready", AsyncMock(return_value=False))
-    resolve_mock = AsyncMock()
+    resolve_mock = AsyncMock(return_value=None)
     monkeypatch.setattr(text_commands, "resolve_gacha_reel_animation", resolve_mock)
-    real_sleep = asyncio.sleep
-    monkeypatch.setattr(text_commands.asyncio, "sleep", AsyncMock())
 
     bot = AsyncMock()
-    bot.delete_message = AsyncMock()
     activity_repo = SimpleNamespace(is_gacha_animation_enabled=AsyncMock(return_value=True))
 
     await text_commands._send_gacha_pull(message, settings, bot, activity_repo, banner="genshin")
-    # the notice is fire-and-forget (must not delay the result above) — give
-    # its background task a couple of real loop iterations to actually run
-    # (text_commands.asyncio.sleep is mocked above, so use the real sleep).
-    for _ in range(5):
-        await real_sleep(0)
+    await _drain_gacha_background()
 
-    resolve_mock.assert_not_awaited()
+    assert resolve_mock.await_args.kwargs["allow_render"] is False
     bot.send_animation.assert_not_awaited()
-    assert any("подготов" in text.lower() for text, _kwargs in message.text_calls)
+    assert not any("подготов" in text.lower() for text, _kwargs in message.text_calls)
     assert len(message.photo_calls) == 1
-    # the "preparing" notice must not linger in the chat forever
-    bot.delete_message.assert_awaited_once()
-    assert bot.delete_message.await_args.kwargs["chat_id"] == message.chat.id
+    _no_background_reel_render.assert_awaited_once()
+    assert _no_background_reel_render.await_args.kwargs["banner"] == "genshin"
+    assert _no_background_reel_render.await_args.kwargs["landing_card_code"] == "amber"
+    assert _no_background_reel_render.await_args.kwargs["landing_rarity"] == "epic"
 
 
 @pytest.mark.asyncio
-async def test_send_gacha_pull_preparing_notice_does_not_delay_result_delivery(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_background_render_does_not_delay_the_result_of_an_uncached_pull(
+    monkeypatch: pytest.MonkeyPatch, _no_background_reel_render: AsyncMock
 ) -> None:
-    """The 7s hold on the 'preparing' notice is purely cosmetic (so it's
-    readable before it vanishes) — it must never delay the real result,
-    unlike the animation's hold which the user is actually meant to watch."""
     message = _DummyMessage()
     settings = SimpleNamespace(gacha_timeout_seconds=10.0)
     monkeypatch.setattr(text_commands, "_load_gacha_custom_emoji_catalog", lambda: {})
@@ -361,27 +364,24 @@ async def test_send_gacha_pull_preparing_notice_does_not_delay_result_delivery(
     monkeypatch.setattr(
         text_commands, "_fetch_gacha_image_file", AsyncMock(return_value=BufferedInputFile(b"x", filename="a.jpg"))
     )
-    monkeypatch.setattr(text_commands, "is_gacha_animation_cache_ready", AsyncMock(return_value=False))
+    monkeypatch.setattr(text_commands, "resolve_gacha_reel_animation", AsyncMock(return_value=None))
+    render_finishes = asyncio.Event()
 
-    never_resolves = asyncio.Event()
-    real_sleep = asyncio.sleep
+    async def render_that_takes_forever(**_kwargs) -> None:
+        await render_finishes.wait()
 
-    async def fake_sleep(delay):
-        if delay == text_commands._GACHA_PREPARING_HOLD_SECONDS:
-            await never_resolves.wait()
-        else:
-            await real_sleep(0)
-
-    monkeypatch.setattr(text_commands.asyncio, "sleep", fake_sleep)
-
+    _no_background_reel_render.side_effect = render_that_takes_forever
     bot = AsyncMock()
     activity_repo = SimpleNamespace(is_gacha_animation_enabled=AsyncMock(return_value=True))
 
-    await asyncio.wait_for(
-        text_commands._send_gacha_pull(message, settings, bot, activity_repo, banner="genshin"), timeout=1.0
-    )
-
-    assert len(message.photo_calls) == 1
+    try:
+        await asyncio.wait_for(
+            text_commands._send_gacha_pull(message, settings, bot, activity_repo, banner="genshin"), timeout=1.0
+        )
+        assert len(message.photo_calls) == 1
+    finally:
+        render_finishes.set()
+        await _drain_gacha_background()
 
 
 @pytest.mark.asyncio
@@ -394,7 +394,6 @@ async def test_send_gacha_pull_still_delivers_result_when_animation_send_fails(
     settings = SimpleNamespace(gacha_timeout_seconds=10.0)
     monkeypatch.setattr(text_commands, "_load_gacha_custom_emoji_catalog", lambda: {})
     monkeypatch.setattr(text_commands, "pull_gacha_card", AsyncMock(return_value=_gacha_pull_response_with_card()))
-    monkeypatch.setattr(text_commands, "is_gacha_animation_cache_ready", AsyncMock(return_value=True))
     monkeypatch.setattr(
         text_commands, "_fetch_gacha_image_file", AsyncMock(return_value=BufferedInputFile(b"x", filename="a.jpg"))
     )
@@ -415,15 +414,10 @@ async def test_send_gacha_pull_still_delivers_result_when_animation_send_fails(
 
 
 @pytest.mark.asyncio
-async def test_send_gacha_pull_still_delivers_result_when_readiness_check_itself_fails(
+async def test_send_gacha_pull_still_delivers_result_when_animation_preference_check_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Pre-deploy audit finding (2026-08-19): is_gacha_animation_cache_ready
-    calls out to the gacha service (network) and was NOT wrapped in
-    try/except at the call site — if it raised (e.g. gacha-service briefly
-    unreachable), the already-computed pull result would never be
-    delivered at all, reproducing exactly the 'lost card' bug class Этап 0
-    was built to eliminate, via a new code path."""
+    """Pre-deploy audit finding (2026-08-19): a failing database lookup must not swallow the already-computed pull result."""
     message = _DummyMessage()
     settings = SimpleNamespace(gacha_timeout_seconds=10.0)
     monkeypatch.setattr(text_commands, "_load_gacha_custom_emoji_catalog", lambda: {})
@@ -431,14 +425,13 @@ async def test_send_gacha_pull_still_delivers_result_when_readiness_check_itself
     monkeypatch.setattr(
         text_commands, "_fetch_gacha_image_file", AsyncMock(return_value=BufferedInputFile(b"x", filename="a.jpg"))
     )
-    monkeypatch.setattr(
-        text_commands, "is_gacha_animation_cache_ready", AsyncMock(side_effect=RuntimeError("gacha service down"))
-    )
     resolve_mock = AsyncMock()
     monkeypatch.setattr(text_commands, "resolve_gacha_reel_animation", resolve_mock)
 
     bot = AsyncMock()
-    activity_repo = SimpleNamespace(is_gacha_animation_enabled=AsyncMock(return_value=True))
+    activity_repo = SimpleNamespace(
+        is_gacha_animation_enabled=AsyncMock(side_effect=RuntimeError("database went away"))
+    )
 
     await text_commands._send_gacha_pull(message, settings, bot, activity_repo, banner="genshin")
 
@@ -509,3 +502,420 @@ async def test_send_gacha_profile_renders_compact_html(monkeypatch: pytest.Monke
     assert "🕘 Последние крутки:" in text
     assert '<tg-emoji emoji-id="epic-id">🟪</tg-emoji> Яо Яо (<b>05.04 в 12:48</b>)' in text
     assert kwargs["parse_mode"] == "HTML"
+
+
+@pytest.mark.asyncio
+async def test_send_gacha_pull_returns_while_the_animation_is_held_and_keeps_the_pull_marked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The update must not wait out the animation hold. The hold, the deletion
+    and the result run in the background, and the user stays marked in flight
+    until the result is out, so a second pull cannot start during the hold."""
+    message = _DummyMessage()
+    settings = SimpleNamespace(gacha_timeout_seconds=10.0)
+    monkeypatch.setattr(text_commands, "_load_gacha_custom_emoji_catalog", lambda: {})
+    monkeypatch.setattr(text_commands, "pull_gacha_card", AsyncMock(return_value=_gacha_pull_response_with_card()))
+    monkeypatch.setattr(
+        text_commands,
+        "_fetch_gacha_image_file",
+        AsyncMock(return_value=BufferedInputFile(b"image-bytes", filename="amber.jpg")),
+    )
+    resolved = SimpleNamespace(payload="fresh-bytes-payload", needs_caching=True, cache_version="v1")
+    monkeypatch.setattr(text_commands, "resolve_gacha_reel_animation", AsyncMock(return_value=resolved))
+    monkeypatch.setattr(text_commands, "cache_reel_variant_after_send", AsyncMock())
+
+    real_sleep = asyncio.sleep
+    hold_released = asyncio.Event()
+
+    async def fake_sleep(delay):
+        if delay == text_commands._GACHA_ANIMATION_HOLD_SECONDS:
+            await hold_released.wait()
+        else:
+            await real_sleep(0)
+
+    monkeypatch.setattr(text_commands.asyncio, "sleep", fake_sleep)
+
+    sent_message = SimpleNamespace(message_id=999, animation=SimpleNamespace(file_id="new-telegram-file-id"))
+    bot = AsyncMock()
+    bot.send_animation = AsyncMock(return_value=sent_message)
+    bot.delete_message = AsyncMock()
+    activity_repo = SimpleNamespace(is_gacha_animation_enabled=AsyncMock(return_value=True))
+
+    await text_commands._send_gacha_pull(message, settings, bot, activity_repo, banner="genshin")
+
+    assert message.from_user.id in text_commands._GACHA_TEXT_PULL_IN_FLIGHT
+    bot.delete_message.assert_not_awaited()
+    assert len(message.photo_calls) == 0
+
+    hold_released.set()
+    await _drain_gacha_background()
+
+    bot.delete_message.assert_awaited_once_with(chat_id=message.chat.id, message_id=999)
+    assert len(message.photo_calls) == 1
+    assert message.from_user.id not in text_commands._GACHA_TEXT_PULL_IN_FLIGHT
+
+
+@pytest.mark.asyncio
+async def test_shutdown_ends_the_animation_hold_and_still_delivers_the_pull_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pull is committed before its hold starts. A restart during the hold must still send the result,
+    without waiting out the whole hold first."""
+    monkeypatch.setattr(text_commands, "_GACHA_SHUTDOWN", asyncio.Event())
+    monkeypatch.setattr(text_commands, "_GACHA_ANIMATION_HOLD_SECONDS", 60.0)
+    delete_mock = AsyncMock()
+    deliver_mock = AsyncMock()
+    monkeypatch.setattr(text_commands, "_delete_gacha_animation", delete_mock)
+    monkeypatch.setattr(text_commands, "_deliver_gacha_pull_response", deliver_mock)
+    message = _DummyMessage()
+    text_commands._GACHA_TEXT_PULL_IN_FLIGHT.add(message.from_user.id)
+
+    text_commands._spawn_gacha_background(
+        text_commands._finish_gacha_pull_after_animation(
+            message,
+            SimpleNamespace(),
+            AsyncMock(),
+            banner="genshin",
+            response=_gacha_pull_response_with_card(),
+            owner_user_id=message.from_user.id,
+            sent=SimpleNamespace(message_id=999),
+        )
+    )
+    await asyncio.sleep(0)
+
+    await asyncio.wait_for(text_commands.drain_gacha_background_tasks(timeout=5), timeout=10)
+
+    delete_mock.assert_awaited_once()
+    deliver_mock.assert_awaited_once()
+    assert message.from_user.id not in text_commands._GACHA_TEXT_PULL_IN_FLIGHT
+
+
+@pytest.mark.asyncio
+async def test_send_gacha_pull_ends_the_db_transaction_after_caching_the_animation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The pooled connection must not sit in an open transaction through the
+    upload or the animation: the caller's session is committed before the
+    upload and again right after the variant is cached."""
+    message = _DummyMessage()
+    settings = SimpleNamespace(gacha_timeout_seconds=10.0)
+    monkeypatch.setattr(text_commands, "_load_gacha_custom_emoji_catalog", lambda: {})
+    monkeypatch.setattr(text_commands, "pull_gacha_card", AsyncMock(return_value=_gacha_pull_response_with_card()))
+    monkeypatch.setattr(
+        text_commands,
+        "_fetch_gacha_image_file",
+        AsyncMock(return_value=BufferedInputFile(b"image-bytes", filename="amber.jpg")),
+    )
+    resolved = SimpleNamespace(payload="fresh-bytes-payload", needs_caching=True, cache_version="v1")
+    resolve_mock = AsyncMock(return_value=resolved)
+    monkeypatch.setattr(text_commands, "resolve_gacha_reel_animation", resolve_mock)
+    events: list[str] = []
+    monkeypatch.setattr(
+        text_commands,
+        "cache_reel_variant_after_send",
+        AsyncMock(side_effect=lambda **_kwargs: events.append("cache")),
+    )
+    monkeypatch.setattr(text_commands.asyncio, "sleep", AsyncMock())
+
+    sent_message = SimpleNamespace(message_id=999, animation=SimpleNamespace(file_id="new-telegram-file-id"))
+
+    def record_upload(**_kwargs):
+        events.append("upload")
+        return sent_message
+
+    bot = AsyncMock()
+    bot.send_animation = AsyncMock(side_effect=record_upload)
+    bot.delete_message = AsyncMock()
+    activity_repo = SimpleNamespace(is_gacha_animation_enabled=AsyncMock(return_value=True))
+    db_session = SimpleNamespace(commit=AsyncMock(side_effect=lambda: events.append("commit")))
+
+    await text_commands._send_gacha_pull(
+        message, settings, bot, activity_repo, banner="genshin", db_session=db_session
+    )
+    await _drain_gacha_background()
+
+    # The transaction ends before the upload and again after the cache write.
+    assert events == ["commit", "upload", "cache", "commit"]
+    assert len(message.photo_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_send_gacha_pull_ends_the_db_transaction_when_the_animation_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed animation falls back to the instant result, and the transaction still ends before that result is sent."""
+    message = _DummyMessage()
+    settings = SimpleNamespace(gacha_timeout_seconds=10.0)
+    monkeypatch.setattr(text_commands, "_load_gacha_custom_emoji_catalog", lambda: {})
+    monkeypatch.setattr(text_commands, "pull_gacha_card", AsyncMock(return_value=_gacha_pull_response_with_card()))
+    monkeypatch.setattr(
+        text_commands, "_fetch_gacha_image_file", AsyncMock(return_value=BufferedInputFile(b"x", filename="a.jpg"))
+    )
+    monkeypatch.setattr(
+        text_commands, "resolve_gacha_reel_animation", AsyncMock(side_effect=RuntimeError("gacha service down"))
+    )
+    bot = AsyncMock()
+    activity_repo = SimpleNamespace(is_gacha_animation_enabled=AsyncMock(return_value=True))
+    db_session = SimpleNamespace(commit=AsyncMock())
+
+    await text_commands._send_gacha_pull(message, settings, bot, activity_repo, banner="genshin", db_session=db_session)
+
+    db_session.commit.assert_awaited_once()
+    bot.send_animation.assert_not_awaited()
+    assert len(message.photo_calls) == 1
+
+
+_GACHA_CHAT_SETTINGS = SimpleNamespace(economy_mode="global", gacha_enabled=True)
+
+
+def _gacha_callback_query(message: _DummyMessage) -> SimpleNamespace:
+    return SimpleNamespace(data="gacha:buy:genshin:u1", from_user=message.from_user, message=message, answer=AsyncMock())
+
+
+def _paid_pull_bot() -> AsyncMock:
+    bot = AsyncMock()
+    bot.send_animation = AsyncMock(
+        return_value=SimpleNamespace(message_id=555, animation=SimpleNamespace(file_id="paid-file-id"))
+    )
+    bot.delete_message = AsyncMock()
+    return bot
+
+
+def _patch_paid_pull_flow(monkeypatch: pytest.MonkeyPatch, *, deliver: AsyncMock) -> None:
+    """Everything around a paid pull's handler, except the animation hold and the result send, which the tests drive."""
+    monkeypatch.setattr(text_commands, "purchase_gacha_pull", AsyncMock(return_value=_gacha_pull_response_with_card()))
+    monkeypatch.setattr(text_commands, "_require_channel_subscription_callback", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        text_commands,
+        "resolve_gacha_reel_animation",
+        AsyncMock(return_value=SimpleNamespace(payload="fresh-bytes-payload", needs_caching=False, cache_version="v1")),
+    )
+    monkeypatch.setattr(text_commands, "_deliver_gacha_pull_response", deliver)
+    monkeypatch.setattr(text_commands, "_build_gacha_info_view", AsyncMock(return_value=("<b>Гача инфо</b>", None)))
+    monkeypatch.setattr(text_commands, "_run_gacha_message_edit", AsyncMock())
+    monkeypatch.setattr(text_commands, "_safe_callback_answer", AsyncMock())
+
+
+@pytest.fixture
+def fresh_gacha_shutdown_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A drain in one test must neither leave shutdown set nor wait on handlers that other tests left behind."""
+    monkeypatch.setattr(text_commands, "_GACHA_SHUTDOWN", asyncio.Event())
+    monkeypatch.setattr(text_commands, "_GACHA_BACKGROUND_TASKS", set())
+    monkeypatch.setattr(text_commands, "_GACHA_PULL_HANDLER_TASKS", set())
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fresh_gacha_shutdown_state")
+async def test_paid_pull_shutdown_ends_the_hold_and_drain_waits_for_its_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A paid pull is committed before its animation hold. A restart during the hold must end the hold early, and the
+    drain must wait for the update handler until the result is out."""
+    monkeypatch.setattr(text_commands, "_GACHA_ANIMATION_HOLD_SECONDS", 60.0)
+    real_hold = text_commands._hold_gacha_animation
+    hold_started = asyncio.Event()
+
+    async def hold_and_signal() -> None:
+        hold_started.set()
+        await real_hold()
+
+    monkeypatch.setattr(text_commands, "_hold_gacha_animation", hold_and_signal)
+    deliver = AsyncMock()
+    _patch_paid_pull_flow(monkeypatch, deliver=deliver)
+    message = _DummyMessage()
+    bot = _paid_pull_bot()
+    activity_repo = SimpleNamespace(is_gacha_animation_enabled=AsyncMock(return_value=True))
+
+    handler = asyncio.create_task(
+        text_commands.gacha_callback(
+            _gacha_callback_query(message),
+            bot=bot,
+            settings=SimpleNamespace(gacha_timeout_seconds=10.0),
+            economy_repo=object(),
+            activity_repo=activity_repo,
+            chat_settings=_GACHA_CHAT_SETTINGS,
+        )
+    )
+    await asyncio.wait_for(hold_started.wait(), timeout=5)
+
+    await text_commands.drain_gacha_background_tasks(timeout=5)
+
+    assert handler.done()
+    await handler
+    bot.delete_message.assert_awaited_once_with(chat_id=message.chat.id, message_id=555)
+    deliver.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fresh_gacha_shutdown_state")
+async def test_shutdown_waits_for_a_result_send_that_takes_longer_than_five_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The drain used to stop after five seconds. A paid result that Telegram needs longer than that to accept must
+    still go out, because the pull is already charged."""
+    deliver_started = asyncio.Event()
+    delivered: list[str] = []
+
+    async def slow_deliver(*_args, **_kwargs) -> None:
+        deliver_started.set()
+        await asyncio.sleep(5.5)
+        delivered.append("result")
+
+    _patch_paid_pull_flow(monkeypatch, deliver=AsyncMock(side_effect=slow_deliver))
+    message = _DummyMessage()
+    activity_repo = SimpleNamespace(is_gacha_animation_enabled=AsyncMock(return_value=False))
+
+    handler = asyncio.create_task(
+        text_commands.gacha_callback(
+            _gacha_callback_query(message),
+            bot=_paid_pull_bot(),
+            settings=SimpleNamespace(gacha_timeout_seconds=10.0),
+            economy_repo=object(),
+            activity_repo=activity_repo,
+            chat_settings=_GACHA_CHAT_SETTINGS,
+        )
+    )
+    await asyncio.wait_for(deliver_started.wait(), timeout=5)
+
+    await text_commands.drain_gacha_background_tasks()
+
+    assert handler.done()
+    await handler
+    assert delivered == ["result"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fresh_gacha_shutdown_state")
+async def test_paid_pull_reaching_shutdown_delivers_its_result_without_rendering_the_animation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A render outlasts the drain, so a pull that reaches shutdown after its purchase skips the animation, ends its
+    transaction and sends the result at once."""
+
+    async def purchase_during_shutdown(*_args, **_kwargs):
+        text_commands._GACHA_SHUTDOWN.set()
+        return _gacha_pull_response_with_card()
+
+    deliver = AsyncMock()
+    _patch_paid_pull_flow(monkeypatch, deliver=deliver)
+    monkeypatch.setattr(text_commands, "purchase_gacha_pull", purchase_during_shutdown)
+    resolve = AsyncMock()
+    monkeypatch.setattr(text_commands, "resolve_gacha_reel_animation", resolve)
+    bot = _paid_pull_bot()
+    activity_repo = SimpleNamespace(is_gacha_animation_enabled=AsyncMock(return_value=True))
+    db_session = SimpleNamespace(commit=AsyncMock())
+
+    await text_commands.gacha_callback(
+        _gacha_callback_query(_DummyMessage()),
+        bot=bot,
+        settings=SimpleNamespace(gacha_timeout_seconds=10.0),
+        economy_repo=object(),
+        activity_repo=activity_repo,
+        chat_settings=_GACHA_CHAT_SETTINGS,
+        db_session=db_session,
+    )
+
+    resolve.assert_not_awaited()
+    bot.send_animation.assert_not_awaited()
+    db_session.commit.assert_awaited_once()
+    deliver.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fresh_gacha_shutdown_state")
+async def test_paid_pull_arriving_after_shutdown_is_refused_before_it_is_charged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once shutdown has started, a buy is refused before the purchase, so nothing is charged for a result that the
+    restart could cut off."""
+    text_commands._GACHA_SHUTDOWN.set()
+    deliver = AsyncMock()
+    _patch_paid_pull_flow(monkeypatch, deliver=deliver)
+    purchase = AsyncMock()
+    monkeypatch.setattr(text_commands, "purchase_gacha_pull", purchase)
+    bot = _paid_pull_bot()
+
+    await text_commands.gacha_callback(
+        _gacha_callback_query(_DummyMessage()),
+        bot=bot,
+        settings=SimpleNamespace(gacha_timeout_seconds=10.0),
+        economy_repo=object(),
+        activity_repo=SimpleNamespace(is_gacha_animation_enabled=AsyncMock(return_value=True)),
+        chat_settings=_GACHA_CHAT_SETTINGS,
+    )
+
+    purchase.assert_not_awaited()
+    deliver.assert_not_awaited()
+    bot.send_animation.assert_not_awaited()
+    answer = text_commands._safe_callback_answer
+    answer.assert_awaited_once()
+    assert answer.await_args.args[1] == text_commands._GACHA_RESTARTING_TEXT
+    assert answer.await_args.kwargs["show_alert"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fresh_gacha_shutdown_state")
+async def test_text_pull_arriving_after_shutdown_is_refused_before_it_is_charged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    text_commands._GACHA_SHUTDOWN.set()
+    pull = AsyncMock(return_value=_gacha_pull_response_with_card())
+    monkeypatch.setattr(text_commands, "pull_gacha_card", pull)
+    message = _DummyMessage()
+    bot = AsyncMock()
+    activity_repo = SimpleNamespace(is_gacha_animation_enabled=AsyncMock(return_value=True))
+
+    await text_commands._send_gacha_pull(
+        message, SimpleNamespace(gacha_timeout_seconds=10.0), bot, activity_repo, banner="genshin"
+    )
+
+    pull.assert_not_awaited()
+    assert message.photo_calls == []
+    assert message.text_calls[0][0] == text_commands._GACHA_RESTARTING_TEXT
+    assert message.from_user.id not in text_commands._GACHA_TEXT_PULL_IN_FLIGHT
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fresh_gacha_shutdown_state")
+async def test_drain_waits_for_a_tail_that_a_handler_hands_off_while_the_drain_runs() -> None:
+    """A handler can hand its tail to a background task after the drain has started. The drain reads the tasks again
+    after each wait, so it also waits for that tail."""
+    release_handler = asyncio.Event()
+    delivered: list[str] = []
+
+    async def tail() -> None:
+        await asyncio.sleep(0.05)
+        delivered.append("result")
+
+    async def handler() -> None:
+        with text_commands._tracked_gacha_pull_handler():
+            await release_handler.wait()
+            text_commands._spawn_gacha_background(tail())
+
+    handler_task = asyncio.create_task(handler())
+    await asyncio.sleep(0)
+    drain = asyncio.create_task(text_commands.drain_gacha_background_tasks(timeout=5))
+    await asyncio.sleep(0)
+
+    release_handler.set()
+    await asyncio.wait_for(drain, timeout=5)
+
+    assert handler_task.done()
+    assert delivered == ["result"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fresh_gacha_shutdown_state")
+async def test_drain_gives_up_at_its_budget_when_a_handler_never_ends() -> None:
+    never_ends = asyncio.Event()
+
+    async def stuck_handler() -> None:
+        with text_commands._tracked_gacha_pull_handler():
+            await never_ends.wait()
+
+    handler_task = asyncio.create_task(stuck_handler())
+    await asyncio.sleep(0)
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    await asyncio.wait_for(text_commands.drain_gacha_background_tasks(timeout=0.2), timeout=5)
+
+    assert loop.time() - started < 2
+    assert not handler_task.done()
+    handler_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await handler_task

@@ -46,10 +46,25 @@ Nginx web image проксирует `/miniapp/readyz`, `/miniapp/healthz` и `/
 Driver читает checksum `/usr/share/nginx/html/index.html` из запущенного web
 контейнера и сравнивает с HTTP response `WEB_BASE_URL/miniapp/`. Stale frontend,
 неправильный upstream, HTTP/TLS ошибка или readiness 503 останавливают deploy
-до продвижения current/previous release metadata. Повторные HTTP checks
-ограничены шестью попытками с паузой 5 секунд; каждый request имеет timeout 5s.
-Если reverse proxy переписывает HTML, такая проверка не пройдёт: production
-route должен отдавать оригинальный frontend document.
+до продвижения current/previous release metadata.
+
+Проверки идут тремя gate по порядку: `local readiness` (`/readyz` внутри app),
+`public frontend` (checksum) и `public readiness` (`WEB_BASE_URL/miniapp/readyz`,
+требуются database, redis и polling). Все gate делят один дедлайн 120 секунд от
+начала проверок; проба повторяется каждые 5 секунд, и ни одна проба не начинается
+на дедлайне или после него. Каждый request имеет timeout 5s. Публичная readiness стоит
+последней, поэтому последняя проба перед promote — именно readiness. Лог показывает,
+какой gate прошёл и сколько проб понадобилось, либо какой gate не прошёл к дедлайну.
+Медленный холодный старт внутри окна не считается ошибкой; реальная ошибка, которая
+держится до дедлайна, останавливает deploy без записи release metadata. Если reverse
+proxy переписывает HTML, проверка checksum не пройдёт: production route должен
+отдавать оригинальный frontend document.
+
+Если deploy упал, когда контейнеры уже работают и приложение здорово, повторно
+запустите `Deploy To VPS` с тем же
+`release_run_id`. Тот же publisher run ID с теми же digests допустим: driver
+пересоздаёт и проверяет контейнеры заново, а при смене digests для известного
+run ID отказывает.
 
 Процесс deploy не может проверить всю бизнес-логику через health probes.
 CI и проверка миграционной совместимости остаются обязательными.
