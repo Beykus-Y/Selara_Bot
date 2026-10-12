@@ -104,7 +104,7 @@ NAV_NODES: tuple[NavNode, ...] = (
     ),
     NavNode(
         key="gacha",
-        title="🎴 Гача Genshin и HSR",
+        title="🎴 Гача Genshin, HSR и ZZZ",
         summary="Крутки персонажей и оружия.",
         parent="games",
         spec_keys=("misc_gacha",),

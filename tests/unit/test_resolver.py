@@ -390,6 +390,15 @@ def test_resolver_raises_for_invalid_gacha_skip_command() -> None:
         resolve_text_command("гача скип генш alice", top_default=10, top_max=50)
 
 
+@pytest.mark.parametrize("text", ["гача", "моя гача", "гача скип"])
+def test_resolver_usage_lists_every_gacha_banner(text: str) -> None:
+    with pytest.raises(TextCommandResolutionError) as exc_info:
+        resolve_text_command(text, top_default=10, top_max=50)
+    message = str(exc_info.value)
+    for alias in ("генш", "геншин", "хср", "ззз", "зенлес"):
+        assert alias in message
+
+
 def test_resolver_rejects_non_command_phrases() -> None:
     assert resolve_text_command("активность", top_default=10, top_max=50) is None
     assert resolve_text_command("кто я такой", top_default=10, top_max=50) is None

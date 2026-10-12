@@ -36,6 +36,11 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.exc import SQLAlchemyError
 
 from selara.application.dto import CommandIntent
+from selara.application.gacha_banners import (
+    GACHA_BANNER_CODES,
+    GACHA_BANNER_PROFILES,
+    get_gacha_banner_profile,
+)
 from selara.application.use_cases.gacha import (
     GACHA_CURRENCY_PER_COIN_RATE,
     GACHA_DEFAULT_CURRENCY_PURCHASE_AMOUNT,
@@ -1446,15 +1451,9 @@ _gacha_subscription_cache: dict[int, tuple[bool, float]] = {}
 # The subscribe link is posted in the chat after an alert, at most once per chat and user in this window.
 _GACHA_SUBSCRIPTION_PROMPT_COOLDOWN = 300
 _gacha_subscription_prompt_sent_at: dict[tuple[int, int], float] = {}
-_GACHA_BANNER_LABELS: dict[str, str] = {
-    "genshin": "Геншин",
-    "hsr": "HSR",
-}
+_GACHA_BANNER_LABELS: dict[str, str] = {profile.code: profile.label for profile in GACHA_BANNER_PROFILES}
 # Text command that runs the free pull (server-side cooldown per banner) for each banner.
-_GACHA_FREE_PULL_COMMANDS: dict[str, str] = {
-    "genshin": "гача генш",
-    "hsr": "гача хср",
-}
+_GACHA_FREE_PULL_COMMANDS: dict[str, str] = {profile.code: profile.free_pull_command for profile in GACHA_BANNER_PROFILES}
 _GACHA_CUSTOM_EMOJI_CATALOG_PATH = Path(__file__).resolve().parents[1] / "gacha_custom_emojis.json"
 _GACHA_GENSHIN_EMOJI_KEYS_BY_TEXT: tuple[tuple[str, str], ...] = (
     ("🍀", "new_card"),
@@ -2016,8 +2015,13 @@ def _gacha_custom_emoji_button_id(*, banner: str, action: str, use_custom_emojis
     return entry.custom_emoji_id
 
 
+def _uses_gacha_custom_emojis(banner: str) -> bool:
+    profile = get_gacha_banner_profile(banner)
+    return profile is not None and profile.uses_custom_emojis
+
+
 def _apply_gacha_custom_emojis_html(text: str, *, banner: str, use_custom_emojis: bool = True) -> str:
-    if not use_custom_emojis or (banner or "").strip().lower() != "genshin":
+    if not use_custom_emojis or not _uses_gacha_custom_emojis(banner):
         return text
     rendered = text
     for fallback, key in _GACHA_GENSHIN_EMOJI_KEYS_BY_TEXT:
@@ -2033,7 +2037,7 @@ def _gacha_escape_message_html(text: str, *, banner: str, use_custom_emojis: boo
 
 
 def _gacha_pull_header_html(*, banner: str, use_custom_emojis: bool = True) -> str:
-    if (banner or "").strip().lower() == "genshin" and use_custom_emojis:
+    if _uses_gacha_custom_emojis(banner) and use_custom_emojis:
         icon = _gacha_custom_emoji_html("event_pull", fallback="🎴")
     else:
         icon = "🎴"
@@ -2061,35 +2065,36 @@ def _gacha_banner_label(banner: str) -> str:
     return _GACHA_BANNER_LABELS.get((banner or "").strip().lower(), banner)
 
 
+def _gacha_quoted_alternatives(commands) -> str:
+    quoted = [f"«{command}»" for command in commands]
+    return ", ".join(quoted[:-1]) + f" или {quoted[-1]}"
+
+
 def _gacha_currency_label(banner: str) -> str:
-    if (banner or "").strip().lower() == "hsr":
-        return "Звездный нефрит"
-    return "Примогемы"
+    profile = get_gacha_banner_profile(banner)
+    return profile.currency_label if profile is not None else "Примогемы"
 
 
 def _gacha_currency_button_label(banner: str) -> str:
     coin_price = _GACHA_CURRENCY_PURCHASE_AMOUNT * _GACHA_COIN_EXCHANGE_RATE
-    if (banner or "").strip().lower() == "hsr":
-        return f"+{_GACHA_CURRENCY_PURCHASE_AMOUNT} нефрита за {coin_price} монет"
-    return f"+{_GACHA_CURRENCY_PURCHASE_AMOUNT} примогемов за {coin_price} монет"
+    profile = get_gacha_banner_profile(banner)
+    currency = profile.currency_short_genitive if profile is not None else "примогемов"
+    return f"+{_GACHA_CURRENCY_PURCHASE_AMOUNT} {currency} за {coin_price} монет"
 
 
 def _gacha_rank_label(banner: str) -> str:
-    if (banner or "").strip().lower() == "hsr":
-        return "Уровень освоения"
-    return "Ранг приключений"
+    profile = get_gacha_banner_profile(banner)
+    return profile.rank_label if profile is not None else "Ранг приключений"
 
 
 def _gacha_info_rank_label(banner: str) -> str:
-    if (banner or "").strip().lower() == "hsr":
-        return "Освоение"
-    return "Ранг"
+    profile = get_gacha_banner_profile(banner)
+    return profile.info_rank_label if profile is not None else "Ранг"
 
 
 def _gacha_info_currency_label(banner: str) -> str:
-    if (banner or "").strip().lower() == "hsr":
-        return "Нефрит"
-    return "Примогемы"
+    profile = get_gacha_banner_profile(banner)
+    return profile.info_currency_label if profile is not None else "Примогемы"
 
 
 def _format_gacha_number(value: int | float) -> str:
@@ -2115,17 +2120,14 @@ def _format_gacha_recent_timestamp(value) -> str:
 
 
 def _gacha_info_banner_heading_html(*, banner: str, use_custom_emojis: bool = True) -> str:
-    normalized_banner = (banner or "").strip().lower()
-    if normalized_banner == "genshin":
-        icon = _gacha_custom_emoji_html("primogem", fallback="💠") if use_custom_emojis else "💠"
-        label = "Геншин"
-    elif normalized_banner == "hsr":
-        icon = "🌌"
-        label = "Honkai: Star Rail"
+    profile = get_gacha_banner_profile(banner)
+    if profile is None:
+        return f"🎴 <b>{escape(_gacha_banner_label(banner))}</b>"
+    if profile.heading_custom_emoji_key and use_custom_emojis:
+        icon = _gacha_custom_emoji_html(profile.heading_custom_emoji_key, fallback=profile.heading_icon)
     else:
-        icon = "🎴"
-        label = _gacha_banner_label(banner)
-    return f"{icon} <b>{escape(label)}</b>"
+        icon = profile.heading_icon
+    return f"{icon} <b>{escape(profile.heading_label)}</b>"
 
 
 def _render_gacha_info_collection_summary(*, response, banner: str, use_custom_emojis: bool) -> str | None:
@@ -2448,7 +2450,7 @@ def _format_gacha_recent_pull(entry) -> str:
 
 
 def _build_gacha_profile_summary_lines(*, banner: str, response, use_custom_emojis: bool = True) -> list[str]:
-    if (banner or "").strip().lower() == "genshin" and use_custom_emojis:
+    if _uses_gacha_custom_emojis(banner) and use_custom_emojis:
         currency_icon = _gacha_custom_emoji_html("primogem", fallback="💠")
     else:
         currency_icon = "💠"
@@ -2540,7 +2542,7 @@ async def _build_gacha_info_view(
     session_factory=None,
     event=None,
 ) -> tuple[str, InlineKeyboardMarkup | None]:
-    banners = ("genshin", "hsr")
+    banners = GACHA_BANNER_CODES
     results = await asyncio.gather(
         *(get_gacha_profile(settings, user_id=user_id, banner=banner) for banner in banners),
         return_exceptions=True,
@@ -2558,14 +2560,14 @@ async def _build_gacha_info_view(
         f"🎫 Крутка: <b>{_format_gacha_number(_GACHA_PAID_PULL_PRICE)}</b> валюты",
         f"💱 Курс: <b>1</b> валюта = <b>{_format_gacha_number(_GACHA_COIN_EXCHANGE_RATE)}</b> монет",
         (
-            f"🆓 Бесплатная крутка: «{_GACHA_FREE_PULL_COMMANDS['genshin']}» или «{_GACHA_FREE_PULL_COMMANDS['hsr']}» "
+            f"🆓 Бесплатная крутка: {_gacha_quoted_alternatives(p.free_pull_command for p in GACHA_BANNER_PROFILES)} "
             "в чате, раз в кулдаун баннера. Если он ещё идёт, бот напишет, сколько ждать."
         ),
         (
-            "🎴 Коллекция: «моя гача генш» или «моя гача хср». Редкость: "
+            f"🎴 Коллекция: {_gacha_quoted_alternatives(p.collection_command for p in GACHA_BANNER_PROFILES)}. Редкость: "
             "⬜ обычная, 🟦 редкая, 🟪 эпическая, 🟨 легендарная, 🟥 мифическая."
         ),
-        "📖 Справка по гаче: /help → 🎮 Игры и развлечения → 🎴 Гача Genshin и HSR.",
+        "📖 Справка по гаче: /help → 🎮 Игры и развлечения → 🎴 Гача Genshin, HSR и ZZZ.",
     ]
     sections.append(_gacha_coin_payment_context(economy_mode=economy_mode, chat_id=chat_id))
     if coin_balance is not None:

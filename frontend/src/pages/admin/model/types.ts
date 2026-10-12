@@ -22,6 +22,7 @@ export type AdminHealthData = {
     redis: AdminHealthComponent
     gacha_genshin: AdminHealthComponent
     gacha_hsr: AdminHealthComponent
+    gacha_zzz: AdminHealthComponent
   }
 }
 

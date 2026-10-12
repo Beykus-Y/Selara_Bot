@@ -691,15 +691,17 @@ def build_miniapp_admin_router(
             _probe_redis(),
             _probe_gacha(settings.resolve_gacha_base_url("genshin")),
             _probe_gacha(settings.resolve_gacha_base_url("hsr")),
+            _probe_gacha(settings.resolve_gacha_base_url("zzz")),
             telegram_bot_probe(),
         )
         components = {
             "web": {"status": "healthy", "latency_ms": round((time.perf_counter() - web_started) * 1000), "checked_at": now.isoformat()},
-            "telegram_bot": {**checks[4], "checked_at": now.isoformat()},
+            "telegram_bot": {**checks[5], "checked_at": now.isoformat()},
             "postgresql": {**checks[0], "checked_at": now.isoformat()},
             "redis": {**checks[1], "checked_at": now.isoformat()},
             "gacha_genshin": {**checks[2], "checked_at": now.isoformat()},
             "gacha_hsr": {**checks[3], "checked_at": now.isoformat()},
+            "gacha_zzz": {**checks[4], "checked_at": now.isoformat()},
         }
         statuses = {item["status"] for item in components.values()}
         for name, component in components.items():

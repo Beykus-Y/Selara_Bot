@@ -98,7 +98,7 @@ def test_user_guide_gacha_triggers_match_catalog() -> None:
     """Gacha (misc_gacha) was previously entirely absent from USER_GUIDE.md
     despite being in the in-bot /help catalog (see
     docs/GACHA_MODERNIZATION_TODO.md, Этап 0)."""
-    section = _section(USER_GUIDE, "## 6.4 Гача (Genshin / HSR)")
+    section = _section(USER_GUIDE, "## 6.4 Гача (Genshin / HSR / ZZZ)")
     gacha = get_command_spec("misc_gacha")
     for trigger in gacha.natural_triggers:
         assert trigger in section, f"USER_GUIDE.md 6.4: missing natural trigger {trigger!r}"

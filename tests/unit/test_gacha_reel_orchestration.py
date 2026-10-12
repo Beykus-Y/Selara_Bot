@@ -319,17 +319,25 @@ def test_compute_cache_version_changes_with_landing_card_etag(monkeypatch: pytes
     assert version_a == version_a_again
 
 
+_CACHED_VERSIONS_BY_BANNER = {
+    "genshin": {"furina": {"v1"}},
+    "hsr": {"kafka": {"v1"}},
+    "zzz": {"rina": {"v1"}},
+}
+
+
 @pytest.mark.asyncio
 async def test_cache_ready_false_when_a_card_has_no_variant_at_all(monkeypatch: pytest.MonkeyPatch) -> None:
     orch._animation_cache_ready = False
     catalogs = {
         "genshin": SimpleNamespace(cards=[SimpleNamespace(code="furina"), SimpleNamespace(code="amber")]),
         "hsr": SimpleNamespace(cards=[SimpleNamespace(code="kafka")]),
+        "zzz": SimpleNamespace(cards=[SimpleNamespace(code="rina")]),
     }
     monkeypatch.setattr(orch, "_get_banner_catalog", AsyncMock(side_effect=lambda settings, banner: catalogs[banner]))
     activity_repo = SimpleNamespace(
         get_gacha_animation_cached_versions_by_card=AsyncMock(
-            side_effect=lambda *, banner: {"furina": {"v1"}} if banner == "genshin" else {"kafka": {"v1"}}
+            side_effect=lambda *, banner: _CACHED_VERSIONS_BY_BANNER[banner]
         )
     )
 
@@ -345,23 +353,24 @@ async def test_cache_ready_true_and_sticky_once_every_card_has_a_variant(monkeyp
     catalogs = {
         "genshin": SimpleNamespace(cards=[SimpleNamespace(code="furina")]),
         "hsr": SimpleNamespace(cards=[SimpleNamespace(code="kafka")]),
+        "zzz": SimpleNamespace(cards=[SimpleNamespace(code="rina")]),
     }
     get_catalog_mock = AsyncMock(side_effect=lambda settings, banner: catalogs[banner])
     monkeypatch.setattr(orch, "_get_banner_catalog", get_catalog_mock)
     activity_repo = SimpleNamespace(
         get_gacha_animation_cached_versions_by_card=AsyncMock(
-            side_effect=lambda *, banner: {"furina": {"v1"}} if banner == "genshin" else {"kafka": {"v1"}}
+            side_effect=lambda *, banner: _CACHED_VERSIONS_BY_BANNER[banner]
         )
     )
 
     first = await orch.is_gacha_animation_cache_ready(SimpleNamespace(), activity_repo)
     assert first is True
-    assert get_catalog_mock.await_count == 2
+    assert get_catalog_mock.await_count == len(_CACHED_VERSIONS_BY_BANNER)
 
     # sticky: a second call must not re-check the DB/catalog at all
     second = await orch.is_gacha_animation_cache_ready(SimpleNamespace(), activity_repo)
     assert second is True
-    assert get_catalog_mock.await_count == 2
+    assert get_catalog_mock.await_count == len(_CACHED_VERSIONS_BY_BANNER)
 
 
 @pytest.mark.asyncio

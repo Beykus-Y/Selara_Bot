@@ -36,8 +36,9 @@ function formatChange(value: number | null) {
   return `${direction} ${Math.abs(value).toLocaleString('ru-RU', { maximumFractionDigits: 1 })}%`
 }
 
-function mergeGachaHealth(genshin: AdminHealthComponent, hsr: AdminHealthComponent): AdminHealthComponent {
-  const statuses = [genshin.status, hsr.status]
+function mergeGachaHealth(...components: AdminHealthComponent[]): AdminHealthComponent {
+  const [first] = components
+  const statuses = components.map((item) => item.status)
   const status: AdminHealthStatus = statuses.includes('down')
     ? 'degraded'
     : statuses.every((item) => item === 'healthy')
@@ -45,17 +46,17 @@ function mergeGachaHealth(genshin: AdminHealthComponent, hsr: AdminHealthCompone
       : statuses.includes('unknown')
         ? 'unknown'
         : 'degraded'
-  const latencies = [genshin.latency_ms, hsr.latency_ms].filter((item): item is number => item !== null)
+  const latencies = components.map((item) => item.latency_ms).filter((item): item is number => item !== null)
   return {
     status,
     latency_ms: latencies.length ? Math.max(...latencies) : null,
-    checked_at: genshin.checked_at,
-    last_success_at: [genshin.last_success_at, hsr.last_success_at].filter((item): item is string => item !== null).sort().at(-1) ?? null,
+    checked_at: first.checked_at,
+    last_success_at: components.map((item) => item.last_success_at).filter((item): item is string => item !== null).sort().at(-1) ?? null,
   }
 }
 
 function HealthRows({ components }: { components: Record<string, AdminHealthComponent> }) {
-  const gacha = mergeGachaHealth(components.gacha_genshin, components.gacha_hsr)
+  const gacha = mergeGachaHealth(components.gacha_genshin, components.gacha_hsr, components.gacha_zzz)
   const rows = [
     { key: 'telegram_bot', title: 'Telegram Bot', component: components.telegram_bot },
     { key: 'web', title: 'Web', component: components.web },
