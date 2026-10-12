@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
+import sys
 import tempfile
 import time
+import types
 from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
@@ -12,6 +15,7 @@ import pytest
 from PIL import Image
 
 from selara.presentation import gacha_reel
+from selara.presentation import gacha_reel_orchestration as orch
 from selara.presentation.gacha_reel import ReelCard, build_gacha_reel_animation
 
 
@@ -134,3 +138,69 @@ def test_build_gacha_reel_animation_requires_at_least_one_filler() -> None:
         pass
     else:
         raise AssertionError("expected ValueError for empty filler_cards")
+
+
+def _gradient_png(size: tuple[int, int]) -> bytes:
+    buffer = BytesIO()
+    Image.linear_gradient("L").resize(size).convert("RGB").save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _load_frozen_renderer(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
+    """The renderer as the cached MP4s were made, loaded from its frozen copy."""
+    path = orch._VISUAL_RENDERER_SOURCE
+    module = types.ModuleType("gacha_reel_visual_v1")
+    module.__file__ = str(path)
+    # Registered before the code runs: dataclasses look the defining module up in sys.modules.
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)
+    return module
+
+
+def _frame_digests_before_encoding(
+    module, monkeypatch: pytest.MonkeyPatch, *, background: bytes, landing: ReelCard, fillers: list[ReelCard]
+) -> tuple[list[str], list[int]]:
+    """One digest per frame, taken where the frames reach the encoder. Keeping the frames themselves would need a
+    few hundred MB, and a digest over the RGB bytes is what the encoder reads anyway."""
+    captured: dict[str, list] = {}
+
+    def capture(frames, durations) -> bytes:
+        captured["digests"] = [hashlib.sha256(frame.convert("RGB").tobytes()).hexdigest() for frame in frames]
+        captured["durations"] = list(durations)
+        return b""
+
+    monkeypatch.setattr(module, "_encode_frames_to_mp4", capture)
+    module.build_gacha_reel_animation(background_bytes=background, landing_card=landing, filler_cards=fillers)
+    return captured["digests"], captured["durations"]
+
+
+def test_live_renderer_draws_the_same_frames_as_the_frozen_copy_the_cache_is_keyed_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cache version hashes the frozen copy, so the live renderer may only change how it encodes, not what it draws.
+    Every frame is compared before the encoder, which keeps the check independent of libx264's output."""
+    background = _gradient_png((640, 360))
+    landing = ReelCard(
+        name="Фурина",
+        rarity_label="🟥 Мифическая",
+        border_color=(230, 60, 70),
+        image_bytes=_gradient_png((200, 260)),
+    )
+    fillers = [
+        ReelCard(
+            name=f"Карта {index}",
+            rarity_label="🟪 Эпическая",
+            border_color=(170, 90, 230),
+            image_bytes=_gradient_png((200, 260)),
+        )
+        for index in range(1, 4)
+    ]
+
+    frozen_digests, frozen_durations = _frame_digests_before_encoding(
+        _load_frozen_renderer(monkeypatch), monkeypatch, background=background, landing=landing, fillers=fillers
+    )
+    live_digests, live_durations = _frame_digests_before_encoding(
+        gacha_reel, monkeypatch, background=background, landing=landing, fillers=fillers
+    )
+
+    assert len(live_digests) == gacha_reel._FRAME_COUNT
+    assert live_durations == frozen_durations
+    assert live_digests == frozen_digests

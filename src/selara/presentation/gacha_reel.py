@@ -13,6 +13,9 @@ from PIL import Image, ImageDraw
 
 from selara.presentation.family_tree import _load_font
 
+# Cached MP4s are keyed on a frozen copy of this module's drawing code (see _VISUAL_RENDERER_SOURCE in
+# gacha_reel_orchestration.py). Changing what is drawn requires a new frozen copy there; tests/unit/test_gacha_reel.py
+# fails until that is done.
 _CANVAS_SIZE = (1280, 720)
 _CARD_SIZE = (180, 180)
 _CARD_GAP = 24

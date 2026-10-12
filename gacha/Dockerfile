@@ -35,4 +35,5 @@ USER 10001:10001
 
 EXPOSE 8001
 
-CMD ["sh", "-c", "alembic upgrade head && uvicorn gacha_service.main:app --host 0.0.0.0 --port 8001"]
+# exec replaces the shell with uvicorn, so the SIGTERM that `docker stop` sends reaches the gacha service.
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn gacha_service.main:app --host 0.0.0.0 --port 8001"]

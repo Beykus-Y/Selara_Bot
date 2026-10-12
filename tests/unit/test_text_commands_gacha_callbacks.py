@@ -14,6 +14,14 @@ from selara.application.use_cases.gacha import GachaUseCaseError
 from selara.infrastructure.http.gacha_client import GachaClientError
 from selara.presentation.handlers import text_commands
 
+
+@pytest.fixture(autouse=True)
+def _no_background_reel_render(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """A pull whose card has no MP4 yet starts a background render. These tests stub it out and check the call."""
+    render = AsyncMock()
+    monkeypatch.setattr(text_commands, "ensure_gacha_reel_on_disk", render)
+    return render
+
 _CHAT_SETTINGS = SimpleNamespace(economy_mode="global", gacha_enabled=True)
 
 
@@ -127,7 +135,6 @@ async def test_gacha_buy_callback_sends_animation_when_enabled_and_ready(monkeyp
     monkeypatch.setattr(text_commands, "_deliver_gacha_pull_response", AsyncMock())
     monkeypatch.setattr(text_commands, "_build_gacha_info_view", AsyncMock(return_value=("<b>Гача инфо</b>", None)))
     monkeypatch.setattr(text_commands, "_is_subscribed_to_channel", AsyncMock(return_value=True))
-    monkeypatch.setattr(text_commands, "is_gacha_animation_cache_ready", AsyncMock(return_value=True))
     resolved = SimpleNamespace(payload="fresh-payload", needs_caching=True, cache_version="v1")
     monkeypatch.setattr(text_commands, "resolve_gacha_reel_animation", AsyncMock(return_value=resolved))
     cache_mock = AsyncMock()
@@ -155,8 +162,8 @@ async def test_gacha_buy_callback_sends_animation_when_enabled_and_ready(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_gacha_buy_callback_delivers_classic_result_without_retry_alert_when_cache_not_ready(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_gacha_buy_callback_delivers_classic_result_without_retry_alert_when_no_cached_animation_yet(
+    monkeypatch: pytest.MonkeyPatch, _no_background_reel_render: AsyncMock
 ) -> None:
     query = _DummyQuery(data="gacha:buy:genshin:u1", user_id=1)
     settings = SimpleNamespace()
@@ -173,8 +180,7 @@ async def test_gacha_buy_callback_delivers_classic_result_without_retry_alert_wh
     monkeypatch.setattr(text_commands, "_deliver_gacha_pull_response", AsyncMock())
     monkeypatch.setattr(text_commands, "_build_gacha_info_view", AsyncMock(return_value=("<b>Гача инфо</b>", None)))
     monkeypatch.setattr(text_commands, "_is_subscribed_to_channel", AsyncMock(return_value=True))
-    monkeypatch.setattr(text_commands, "is_gacha_animation_cache_ready", AsyncMock(return_value=False))
-    resolve_mock = AsyncMock()
+    resolve_mock = AsyncMock(return_value=None)
     monkeypatch.setattr(text_commands, "resolve_gacha_reel_animation", resolve_mock)
     deliver_mock = AsyncMock()
     monkeypatch.setattr(text_commands, "_deliver_gacha_pull_response", deliver_mock)
@@ -187,7 +193,11 @@ async def test_gacha_buy_callback_delivers_classic_result_without_retry_alert_wh
 
     await text_commands.gacha_callback(query, bot=bot, settings=settings, economy_repo=economy_repo, activity_repo=activity_repo, chat_settings=_CHAT_SETTINGS)
 
-    resolve_mock.assert_not_awaited()
+    resolve_mock.assert_awaited_once()
+    assert resolve_mock.await_args.kwargs["allow_render"] is False
+    # The background render is a task that starts on the next loop iteration.
+    await asyncio.sleep(0)
+    _no_background_reel_render.assert_awaited_once()
     bot.send_animation.assert_not_awaited()
     purchase_mock.assert_awaited_once()  # the real pull result must still go through
     deliver_mock.assert_awaited_once()
@@ -226,12 +236,11 @@ async def test_gacha_callback_unsubscribed_user_gets_alert_and_tappable_subscrib
 
 
 @pytest.mark.asyncio
-async def test_gacha_buy_callback_still_delivers_result_when_readiness_check_fails(
+async def test_gacha_buy_callback_still_delivers_result_when_animation_preference_check_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Same pre-deploy audit finding as the text-command path (2026-08-19):
-    is_gacha_animation_cache_ready must not be able to swallow the already-
-    paid-for pull result if it raises."""
+    """Same pre-deploy audit finding as the text-command path (2026-08-19): a failing lookup must not swallow the
+    already-paid-for pull result."""
     query = _DummyQuery(data="gacha:buy:genshin:u1", user_id=1)
     settings = SimpleNamespace()
     economy_repo = object()
@@ -248,16 +257,13 @@ async def test_gacha_buy_callback_still_delivers_result_when_readiness_check_fai
     monkeypatch.setattr(text_commands, "_deliver_gacha_pull_response", deliver_mock)
     monkeypatch.setattr(text_commands, "_build_gacha_info_view", AsyncMock(return_value=("<b>Гача инфо</b>", None)))
     monkeypatch.setattr(text_commands, "_is_subscribed_to_channel", AsyncMock(return_value=True))
-    monkeypatch.setattr(
-        text_commands, "is_gacha_animation_cache_ready", AsyncMock(side_effect=RuntimeError("gacha service down"))
-    )
     resolve_mock = AsyncMock()
     monkeypatch.setattr(text_commands, "resolve_gacha_reel_animation", resolve_mock)
 
     bot = AsyncMock()
     activity_repo = SimpleNamespace(
         is_subscription_exempt=AsyncMock(return_value=False),
-        is_gacha_animation_enabled=AsyncMock(return_value=True),
+        is_gacha_animation_enabled=AsyncMock(side_effect=RuntimeError("database went away")),
     )
 
     await text_commands.gacha_callback(query, bot=bot, settings=settings, economy_repo=economy_repo, activity_repo=activity_repo, chat_settings=_CHAT_SETTINGS)
