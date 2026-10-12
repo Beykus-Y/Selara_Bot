@@ -109,9 +109,11 @@ def _bot():
 
 
 @pytest.mark.asyncio
-async def test_reader_stops_fetching_once_pending_updates_reach_the_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With every handler stalled, admitted updates stop at four times the concurrency limit. The reader then waits
-    instead of fetching more, so a stall cannot grow the in-memory queue without bound."""
+async def test_reader_keeps_reading_past_the_ceiling_and_drops_the_ordinary_updates_that_do_not_fit(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """With every handler stalled, four times the concurrency limit is admitted and the updates past it are dropped with
+    a warning. The reader still reads the whole batch, so memory stays bounded without holding up what comes next."""
     dispatcher = PaymentSafeDispatcher()
     read: list[int] = []
     handled: list[int] = []
@@ -130,19 +132,56 @@ async def test_reader_stops_fetching_once_pending_updates_reach_the_ceiling(monk
     monkeypatch.setattr(dispatcher, "_listen_updates", listen_updates)
     monkeypatch.setattr(dispatcher, "_process_update", process_update)
 
-    polling = asyncio.create_task(dispatcher._polling(_bot(), tasks_concurrency_limit=2))
-    await _wait_until(lambda: len(read) == 9)
-    await asyncio.sleep(0.02)
+    await asyncio.wait_for(dispatcher._polling(_bot(), tasks_concurrency_limit=2), timeout=2)
 
-    # Eight admitted tasks (2 * 4). The reader has pulled a ninth update and is now blocked on the ceiling.
+    # Eight admitted tasks (2 * 4). The other 22 updates were read and dropped.
+    assert read == list(range(30))
     assert len(dispatcher._handle_update_tasks) == 8
-    assert len(read) == 9
+    assert "Dropped update id=8" in caplog.text
 
     release.set()
-    await asyncio.wait_for(polling, timeout=2)
-    await _wait_until(lambda: len(handled) == 30)
-    assert sorted(handled) == list(range(30))
+    await _wait_until(lambda: len(handled) == 8)
     await _wait_until(lambda: dispatcher._handle_update_tasks == set())
+    assert sorted(handled) == list(range(8))
+
+
+@pytest.mark.asyncio
+async def test_pre_checkout_read_behind_an_ordinary_update_at_the_ceiling_is_dispatched_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: the reader used to park on an ordinary update once the ceiling was full, so a pre-checkout query read
+    after it waited for a stalled handler to finish. Telegram allows ten seconds for that answer."""
+    dispatcher = PaymentSafeDispatcher()
+    pre_checkout = SimpleNamespace(update_id=99, pre_checkout_query=SimpleNamespace(id="q"), message=None)
+    release = asyncio.Event()
+    pending_when_payment: list[int] = []
+    handled: list[int] = []
+
+    async def listen_updates(*_args, **_kwargs):
+        for update_id in range(4):
+            yield _plain_update(update_id)
+        # The ceiling (1 * 4) is full. This ordinary update is the one a parked reader used to wait on.
+        yield _plain_update(4)
+        yield pre_checkout
+
+    async def process_update(*, bot, update, **_kwargs) -> bool:
+        if update.update_id == 99:
+            pending_when_payment.append(len(dispatcher._handle_update_tasks))
+        else:
+            await release.wait()
+        handled.append(update.update_id)
+        return True
+
+    monkeypatch.setattr(dispatcher, "_listen_updates", listen_updates)
+    monkeypatch.setattr(dispatcher, "_process_update", process_update)
+
+    await asyncio.wait_for(dispatcher._polling(_bot(), tasks_concurrency_limit=1), timeout=2)
+
+    # The payment ran while all four admitted handlers were still stalled. The fifth ordinary update was dropped.
+    assert pending_when_payment == [4]
+    assert handled == [99]
+    release.set()
+    await _wait_until(lambda: sorted(handled) == [0, 1, 2, 3, 99])
 
 
 @pytest.mark.asyncio
@@ -184,30 +223,36 @@ async def test_payment_read_while_pending_ceiling_is_full_is_dispatched_at_once(
 
 @pytest.mark.asyncio
 async def test_failed_handler_releases_its_pending_slot(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A handler that raises must free its pending slot, or the reader would stop for good after the ceiling."""
+    """A handler that raises must free its pending slot, or every later ordinary update would be dropped once the ceiling
+    was reached."""
     dispatcher = PaymentSafeDispatcher()
-    read: list[int] = []
+    handled: list[int] = []
 
     async def listen_updates(*_args, **_kwargs):
-        for update_id in range(20):
-            read.append(update_id)
+        for update_id in range(4):
+            yield _plain_update(update_id)
+        # Let the four failing handlers finish first. The updates after them must be admitted, not dropped.
+        await _wait_until(lambda: not dispatcher._handle_update_tasks)
+        for update_id in range(4, 8):
             yield _plain_update(update_id)
 
     async def process_update(*, bot, update, **_kwargs) -> bool:
-        raise RuntimeError("handler failed")
+        if update.update_id < 4:
+            raise RuntimeError("handler failed")
+        handled.append(update.update_id)
+        return True
 
     monkeypatch.setattr(dispatcher, "_listen_updates", listen_updates)
     monkeypatch.setattr(dispatcher, "_process_update", process_update)
 
     await asyncio.wait_for(dispatcher._polling(_bot(), tasks_concurrency_limit=1), timeout=2)
-    await _wait_until(lambda: dispatcher._handle_update_tasks == set())
-
-    assert read == list(range(20))
+    await _wait_until(lambda: sorted(handled) == [4, 5, 6, 7])
 
 
 @pytest.mark.asyncio
 async def test_cancelling_polling_while_the_queue_is_full_stops_promptly(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Shutdown cancels the reader even when it is parked on a full queue. The stalled handlers do not hold it up."""
+    """Shutdown cancels the reader even while handlers are stalled and the ceiling is full. The stalled handlers do not
+    hold it up."""
     dispatcher = PaymentSafeDispatcher()
     read: list[int] = []
     never = asyncio.Event()
@@ -218,6 +263,9 @@ async def test_cancelling_polling_while_the_queue_is_full_stops_promptly(monkeyp
             read.append(update_id)
             yield _plain_update(update_id)
             update_id += 1
+            # The real listener awaits Telegram between batches. Without a suspension point here, this loop would never
+            # give the cancellation a chance to arrive.
+            await asyncio.sleep(0)
 
     async def process_update(*, bot, update, **_kwargs) -> bool:
         await never.wait()
@@ -227,8 +275,7 @@ async def test_cancelling_polling_while_the_queue_is_full_stops_promptly(monkeyp
     monkeypatch.setattr(dispatcher, "_process_update", process_update)
 
     polling = asyncio.create_task(dispatcher._polling(_bot(), tasks_concurrency_limit=1))
-    await _wait_until(lambda: len(read) == 5)
-    await asyncio.sleep(0.02)
+    await _wait_until(lambda: len(read) >= 10)
     assert len(dispatcher._handle_update_tasks) == 4
 
     polling.cancel()
@@ -239,4 +286,3 @@ async def test_cancelling_polling_while_the_queue_is_full_stops_promptly(monkeyp
     for task in stalled:
         task.cancel()
     await asyncio.gather(*stalled, return_exceptions=True)
-    assert len(read) == 5
