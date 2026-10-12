@@ -223,9 +223,23 @@ async def _acquire_render_slot(*, wait: bool) -> None:
         await asyncio.sleep(_RENDER_SLOT_POLL_SECONDS)
 
 
-def _render_reel_in_worker(*, build_kwargs: dict) -> bytes:
+def _render_reel_in_worker(
+    *, build_kwargs: dict, settings: Settings, banner: str, card_code: str, cache_version: str
+) -> bytes:
+    """Runs in `_RENDER_EXECUTOR`. The MP4 goes to the local disk tier from this thread as well, so a render that a
+    timeout has abandoned is not thrown away: it is picked up from disk on the next attempt."""
     try:
-        return build_gacha_reel_animation(**build_kwargs)
+        started = time.monotonic()
+        content = build_gacha_reel_animation(**build_kwargs)
+        rendered = time.monotonic()
+        _write_local_reel_atomic(
+            settings=settings, banner=banner, card_code=card_code, cache_version=cache_version, content=content
+        )
+        logger.info(
+            "Gacha reel rendered: banner=%s card=%s version=%s render_seconds=%.1f write_seconds=%.2f",
+            banner, card_code, cache_version, rendered - started, time.monotonic() - rendered,
+        )
+        return content
     finally:
         _render_slot.release()
 
@@ -238,6 +252,7 @@ async def _render_reel_gif(
     landing_card_name: str,
     landing_rarity_label: str,
     landing_border_color: tuple[int, int, int],
+    cache_version: str,
     wait_for_slot: bool = False,
 ) -> bytes:
     catalog = await _get_banner_catalog(settings, banner)
@@ -284,7 +299,15 @@ async def _render_reel_gif(
     await _acquire_render_slot(wait=wait_for_slot)
     try:
         future = asyncio.get_running_loop().run_in_executor(
-            _RENDER_EXECUTOR, partial(_render_reel_in_worker, build_kwargs=build_kwargs)
+            _RENDER_EXECUTOR,
+            partial(
+                _render_reel_in_worker,
+                build_kwargs=build_kwargs,
+                settings=settings,
+                banner=banner,
+                card_code=landing_card_code,
+                cache_version=cache_version,
+            ),
         )
     except BaseException:
         _render_slot.release()
@@ -356,10 +379,8 @@ async def resolve_gacha_reel_animation(
         landing_card_name=landing_card_name,
         landing_rarity_label=landing_rarity_label,
         landing_border_color=_rarity_border_color(landing_rarity),
+        cache_version=cache_version,
         wait_for_slot=wait_for_render_slot,
-    )
-    _write_local_reel_atomic(
-        settings=settings, banner=banner, card_code=landing_card_code, cache_version=cache_version, content=mp4_bytes
     )
     filename = f"gacha_reel_{banner}_{landing_card_code}.mp4"
     return ResolvedReelAnimation(
@@ -425,7 +446,16 @@ async def warm_up_gacha_animation_cache(
             continue
 
         for card in catalog.cards:
-            if card.code in cached_versions:
+            try:
+                current_version = await _compute_landing_cache_version(
+                    settings, banner=banner, landing_card_code=card.code
+                )
+            except Exception:
+                logger.warning("Gacha animation warmup: cannot compute cache version for %s/%s", banner, card.code, exc_info=True)
+                continue
+            # Compare with the version the renderer produces today, not with "any version": after a renderer change the
+            # old variants are stale, and a user pull would otherwise render live inside its handler.
+            if current_version in cached_versions.get(card.code, set()):
                 continue
             try:
                 await asyncio.wait_for(
