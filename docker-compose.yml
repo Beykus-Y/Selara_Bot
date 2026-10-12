@@ -55,15 +55,18 @@ services:
     #     and restart: unless-stopped would turn that into a restart loop.
     #   - pids_limit 512: the limit counts threads, shared by Chromium, ffmpeg
     #     and the asyncio thread pool.
-    #   - init: true: PID 1 below is `sh -c "alembic upgrade head && python -m
-    #     selara.main"`, which does not reap orphaned Chromium/crashpad
-    #     children; a real init process does.
+    #   - init: true: tini is PID 1. It reaps orphaned Chromium/crashpad
+    #     children, which the bot does not, and forwards SIGTERM to the bot,
+    #     which the Dockerfile CMD execs.
     image: ${SELARA_IMAGE:-selara:local}
     build:
       context: .
       dockerfile: Dockerfile
     container_name: selara-app
     restart: unless-stopped
+    # The shutdown drain waits up to 20 s for pending gacha results (_GACHA_SHUTDOWN_DRAIN_SECONDS), then the
+    # cleanup runs. Docker's default 10 s would SIGKILL the process before that.
+    stop_grace_period: 30s
     init: true
     user: "10001:10001"
     read_only: true

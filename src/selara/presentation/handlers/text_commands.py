@@ -5,6 +5,8 @@ import random
 import re
 import hashlib
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from os.path import basename
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -178,9 +180,12 @@ _GACHA_CALLBACK_IN_FLIGHT: set[tuple[int, int]] = set()
 _GACHA_TEXT_PULL_IN_FLIGHT: set[int] = set()
 # Fire-and-forget gacha tasks (animation tails, preparing notices), each kept alive until it ends.
 _GACHA_BACKGROUND_TASKS: set[asyncio.Task] = set()
+# Gacha update handlers still running. Shutdown waits for them, so a pull result that is being sent still goes out.
+_GACHA_PULL_HANDLER_TASKS: set[asyncio.Task] = set()
 # Set at shutdown so pending animation holds end early and their pull results still go out.
 _GACHA_SHUTDOWN = asyncio.Event()
-_GACHA_SHUTDOWN_DRAIN_SECONDS = 5.0
+# Stays below docker-compose stop_grace_period (30 s), which also has to cover the cleanup after the drain.
+_GACHA_SHUTDOWN_DRAIN_SECONDS = 20.0
 
 
 def _gacha_message_lock_key(message: Message) -> tuple[int, int]:
@@ -2698,6 +2703,7 @@ async def _deliver_gacha_pull_response(message: Message, settings: Settings, *, 
 _GACHA_ANIMATION_HOLD_SECONDS = 12.0
 _GACHA_PREPARING_HOLD_SECONDS = 7.0
 _GACHA_PREPARING_TEXT = "🎬 Гача выполняет подготовку анимаций, попробуйте позже."
+_GACHA_RESTARTING_TEXT = "Бот перезапускается, попробуйте через минуту."
 
 
 async def _send_gacha_animation_preparing_notice(message: Message, bot: Bot) -> None:
@@ -2737,13 +2743,34 @@ async def _hold_gacha_animation() -> None:
         shutdown.cancel()
 
 
+@contextmanager
+def _tracked_gacha_pull_handler() -> Iterator[None]:
+    """Keeps the update handler that runs a gacha action in _GACHA_PULL_HANDLER_TASKS until the handler returns."""
+    task = asyncio.current_task()
+    _GACHA_PULL_HANDLER_TASKS.add(task)
+    try:
+        yield
+    finally:
+        _GACHA_PULL_HANDLER_TASKS.discard(task)
+
+
 async def drain_gacha_background_tasks(timeout: float = _GACHA_SHUTDOWN_DRAIN_SECONDS) -> None:
-    """Shutdown: end the animation holds early and wait, at most `timeout` seconds, for the pending tasks.
-    A pull is already committed when its hold starts, so a restart during the hold must still deliver its result."""
+    """Shutdown: end the animation holds early and wait, at most `timeout` seconds, until no gacha handler or background
+    task is left. A handler can hand its tail to a background task while the drain waits, so both sets are read again
+    after every wait. A pull is already committed when its hold starts, so a restart during the hold must still deliver
+    its result."""
     _GACHA_SHUTDOWN.set()
-    pending = set(_GACHA_BACKGROUND_TASKS)
-    if pending:
-        await asyncio.wait(pending, timeout=timeout)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        pending = _GACHA_BACKGROUND_TASKS | _GACHA_PULL_HANDLER_TASKS
+        if not pending:
+            return
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            logger.warning("Gacha shutdown drain ended with %d task(s) still running", len(pending))
+            return
+        await asyncio.wait(pending, timeout=remaining)
 
 
 async def _delete_gacha_animation(bot: Bot, message: Message, sent) -> None:
@@ -2781,7 +2808,12 @@ async def _send_gacha_pull_animation(
 
     `release_connection` ends the caller's transaction before a render and
     again after the cache write, so no pooled connection sits idle while the
-    animation is shown."""
+    animation is shown. It also ends the transaction on every path that sends
+    no animation, so the instant result does not hold one either."""
+    if _GACHA_SHUTDOWN.is_set():
+        # Shutdown has started. A render would outlast the drain, so the instant result goes out without an animation.
+        await _end_pull_transaction(release_connection)
+        return None
     try:
         resolved = await resolve_gacha_reel_animation(
             settings=settings,
@@ -2828,6 +2860,7 @@ async def _send_gacha_pull_animation(
             "Gacha reel render already running, delivering instant result",
             extra={"chat_id": getattr(message.chat, "id", None), "banner": banner},
         )
+        await _end_pull_transaction(release_connection)
         return None
     except Exception:
         logger.warning(
@@ -2835,6 +2868,7 @@ async def _send_gacha_pull_animation(
             extra={"chat_id": getattr(message.chat, "id", None), "banner": banner},
             exc_info=True,
         )
+        await _end_pull_transaction(release_connection)
         return None
     await _end_pull_transaction(release_connection)
     return sent
@@ -2850,7 +2884,7 @@ async def _try_send_gacha_pull_animation(
     if sent is None:
         return
     try:
-        await asyncio.sleep(_GACHA_ANIMATION_HOLD_SECONDS)
+        await _hold_gacha_animation()
         await _delete_gacha_animation(bot, message, sent)
     except Exception:
         logger.warning(
@@ -2903,15 +2937,16 @@ async def _send_gacha_pull(
     _GACHA_TEXT_PULL_IN_FLIGHT.add(user_id)
     handed_off = False
     try:
-        handed_off = await _send_gacha_pull_impl(
-            message,
-            settings,
-            bot,
-            activity_repo,
-            banner=banner,
-            session_factory=session_factory,
-            db_session=db_session,
-        )
+        with _tracked_gacha_pull_handler():
+            handed_off = await _send_gacha_pull_impl(
+                message,
+                settings,
+                bot,
+                activity_repo,
+                banner=banner,
+                session_factory=session_factory,
+                db_session=db_session,
+            )
     finally:
         # A background tail that is still holding the animation keeps the marker until it has delivered the result.
         if not handed_off:
@@ -2929,6 +2964,10 @@ async def _send_gacha_pull_impl(
     db_session=None,
 ) -> bool:
     """Returns True when a background task now owns the pull's in-flight marker."""
+    if _GACHA_SHUTDOWN.is_set():
+        # Refused before pull_gacha_card charges, so a restart cannot leave a charged pull without its result.
+        await _answer_quiet(message, _GACHA_RESTARTING_TEXT)
+        return False
     try:
         response = await pull_gacha_card(
             settings,
@@ -5628,16 +5667,17 @@ async def gacha_callback(
 
     _GACHA_CALLBACK_IN_FLIGHT.add(lock_key)
     try:
-        await _gacha_callback_impl(
-            query,
-            bot=bot,
-            settings=settings,
-            economy_repo=economy_repo,
-            activity_repo=activity_repo,
-            chat_settings=chat_settings,
-            session_factory=session_factory,
-            db_session=db_session,
-        )
+        with _tracked_gacha_pull_handler():
+            await _gacha_callback_impl(
+                query,
+                bot=bot,
+                settings=settings,
+                economy_repo=economy_repo,
+                activity_repo=activity_repo,
+                chat_settings=chat_settings,
+                session_factory=session_factory,
+                db_session=db_session,
+            )
     finally:
         _GACHA_CALLBACK_IN_FLIGHT.discard(lock_key)
 
@@ -5675,6 +5715,10 @@ async def _gacha_callback_impl(
     economy_chat_id = _gacha_economy_chat_id(chat_type=query.message.chat.type, chat_id=query.message.chat.id)
 
     if action == "buy":
+        if _GACHA_SHUTDOWN.is_set():
+            # Refused before purchase_gacha_pull charges, so a restart cannot leave a charged pull without its result.
+            await _safe_callback_answer(query, _GACHA_RESTARTING_TEXT, show_alert=True)
+            return
         try:
             response = await purchase_gacha_pull(
                 settings,

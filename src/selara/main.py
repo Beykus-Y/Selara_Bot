@@ -327,9 +327,10 @@ async def _run_bot(settings, session_factory) -> None:
     db_pressure_task = asyncio.create_task(_log_db_pressure(session_factory, db_admission), name="db-pressure-log")
     mark_bot_polling_started()
     try:
-        await dispatcher.start_polling(bot, **polling_kwargs)
+        # aiogram would close the bot session before the gacha drain, and the drain still sends through it.
+        await dispatcher.start_polling(bot, close_bot_session=False, **polling_kwargs)
     finally:
-        # Pending gacha results go out while the bot session is still open, which happens further down.
+        # Pending gacha results go out while the bot session is still open; it is closed at the end of this block.
         await drain_gacha_background_tasks()
         mark_bot_polling_stopped()
         heartbeat_task.cancel()

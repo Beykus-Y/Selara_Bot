@@ -45,4 +45,6 @@ USER 10001:10001
 
 EXPOSE 8080
 
-CMD ["sh", "-c", "alembic upgrade head && python -m selara.main"]
+# exec replaces the shell with the bot, so the SIGTERM that init forwards on `docker stop`
+# reaches the bot and starts the gacha shutdown drain.
+CMD ["sh", "-c", "alembic upgrade head && exec python -m selara.main"]
