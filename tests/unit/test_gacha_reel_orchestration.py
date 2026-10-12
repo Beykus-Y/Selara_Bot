@@ -1177,6 +1177,42 @@ async def test_render_budget_cuts_the_wait_but_the_render_still_lands_on_disk(mo
     ) == mp4
 
 
+@pytest.mark.asyncio
+async def test_a_render_that_waited_for_the_slot_reuses_the_copy_an_abandoned_render_wrote(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """A render cut off by its budget keeps running and still writes its MP4. A retry that was waiting for the slot must
+    take that copy once the slot is free, not render the same card a second time."""
+    monkeypatch.setattr(orch, "_get_banner_catalog", AsyncMock(return_value=_render_test_catalog()))
+    monkeypatch.setattr(orch, "_fetch_bytes_cached", AsyncMock(return_value=b"img-bytes"))
+    rendered: list[bytes] = []
+
+    def must_not_render(**_kwargs) -> bytes:
+        rendered.append(b"second render")
+        return b"second render"
+
+    monkeypatch.setattr(orch, "build_gacha_reel_animation", must_not_render)
+    kwargs = _render_kwargs(tmp_path)
+    mp4 = _valid_mp4_bytes()
+    assert orch._render_slot.acquire(blocking=False)  # the abandoned render still holds the slot
+
+    async def finish_the_abandoned_render() -> None:
+        await asyncio.sleep(0.05)
+        orch._write_local_reel_atomic(
+            settings=kwargs["settings"], banner="genshin", card_code="furina", cache_version="v1", content=mp4
+        )
+        orch._render_slot.release()
+
+    finisher = asyncio.create_task(finish_the_abandoned_render())
+    try:
+        result = await orch._render_reel_gif(**kwargs, wait_for_slot=True, slot_timeout=5)
+    finally:
+        await finisher
+
+    assert result == mp4
+    assert rendered == []
+
+
 def _warm_up_catalog(*card_codes: str) -> SimpleNamespace:
     return SimpleNamespace(
         cards=[SimpleNamespace(code=code, name=code.title(), rarity="common", rarity_label="⬜") for code in card_codes]

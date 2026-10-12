@@ -319,6 +319,11 @@ async def _render_reel_gif(
         "filler_cards": filler_cards,
     }
     await _acquire_render_slot(wait=wait_for_slot, timeout=slot_timeout)
+    # A render that a timeout abandoned may have written this card's MP4 while this call waited for the slot.
+    local_bytes = _read_local_reel(settings=settings, banner=banner, card_code=landing_card_code, cache_version=cache_version)
+    if local_bytes is not None:
+        _render_slot.release()
+        return local_bytes
     try:
         job = _RENDER_EXECUTOR.submit(
             partial(
