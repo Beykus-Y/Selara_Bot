@@ -326,6 +326,7 @@ async def resolve_gacha_reel_animation(
     landing_rarity_label: str,
     skip_cached_lookup: bool = False,
     wait_for_render_slot: bool = False,
+    release_connection=None,
 ) -> ResolvedReelAnimation:
     """Three tiers, cheapest first: Telegram `file_id` (Postgres, решение 9's
     hybrid cache) → local GIF on disk (survives restarts, avoids a re-render
@@ -334,7 +335,9 @@ async def resolve_gacha_reel_animation(
     Telegram rejected it, so retrying the same file_id would just fail again.
     A render only starts when no other render is running: user pulls pass
     `wait_for_render_slot=False` and get `GachaRenderBusyError` instead of
-    queueing; the warmup waits for its turn.
+    queueing; the warmup waits for its turn. `release_connection` is awaited
+    right before a render, so the caller's pooled connection is not held
+    through the render.
     Caching the *result* of a successful send (a new file_id) is the
     caller's job via `cache_reel_variant_after_send`, not this function's —
     this function only decides what to try sending."""
@@ -372,6 +375,8 @@ async def resolve_gacha_reel_animation(
         "Gacha reel resolved: tier=render banner=%s card=%s version=%s",
         banner, landing_card_code, cache_version,
     )
+    if release_connection is not None:
+        await release_connection()
     mp4_bytes = await _render_reel_gif(
         settings=settings,
         banner=banner,
@@ -424,7 +429,7 @@ async def is_gacha_animation_cache_ready(settings: Settings, activity_repo, bann
 
 
 async def warm_up_gacha_animation_cache(
-    *, settings: Settings, bot: Bot, activity_repo, on_card_done=None, on_card_error=None
+    *, settings: Settings, bot: Bot, activity_repo, on_card_done=None, on_card_error=None, release_connection=None
 ) -> None:
     """Fire-and-forget background warmup (see docs/GACHA_MODERNIZATION_TODO.md,
     раздел 10): ensures at least one cached variant per card across active
@@ -444,6 +449,9 @@ async def warm_up_gacha_animation_cache(
         except Exception:
             logger.warning("Gacha animation warmup: failed to load catalog for %s", banner, exc_info=True)
             continue
+        if release_connection is not None:
+            # Ends the read-only transaction now, before the per-card version checks make network calls.
+            await release_connection()
 
         for card in catalog.cards:
             try:
@@ -466,6 +474,7 @@ async def warm_up_gacha_animation_cache(
                         banner=banner,
                         card=card,
                         on_card_done=on_card_done,
+                        release_connection=release_connection,
                     ),
                     timeout=_WARMUP_CARD_TIMEOUT_SECONDS,
                 )
@@ -502,7 +511,9 @@ async def _safe_on_card_error(on_card_error, *, banner: str, card_code: str) -> 
         logger.warning("Gacha animation warmup: rollback after failure also failed for %s/%s", banner, card_code, exc_info=True)
 
 
-async def _warm_up_one_card(*, settings: Settings, bot: Bot, activity_repo, banner: str, card, on_card_done) -> None:
+async def _warm_up_one_card(
+    *, settings: Settings, bot: Bot, activity_repo, banner: str, card, on_card_done, release_connection=None
+) -> None:
     resolved = await resolve_gacha_reel_animation(
         settings=settings,
         activity_repo=activity_repo,
@@ -512,6 +523,7 @@ async def _warm_up_one_card(*, settings: Settings, bot: Bot, activity_repo, bann
         landing_rarity=card.rarity,
         landing_rarity_label=card.rarity_label,
         wait_for_render_slot=True,
+        release_connection=release_connection,
     )
     sent = await bot.send_animation(chat_id=settings.gacha_admin_user_id, animation=resolved.payload)
     if resolved.needs_caching and getattr(sent, "animation", None) is not None:
