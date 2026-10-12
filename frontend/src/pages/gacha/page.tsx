@@ -58,13 +58,6 @@ export function GachaCollectionPage() {
     epic: 'oklch(0.7 0.16 320)',
     rare: 'oklch(0.76 0.12 250)',
   }
-  const rarityLabel: Record<string, string> = {
-    mythic: 'Мифическая',
-    legendary: 'Легендарная',
-    epic: 'Эпическая',
-    rare: 'Редкая',
-    common: 'Обычная',
-  }
   const switchBanner = (next: GachaBanner) => {
     const nextParams = new URLSearchParams(searchParams)
     if (next !== 'genshin') nextParams.set('banner', next)
@@ -121,7 +114,7 @@ export function GachaCollectionPage() {
               <span className="v2-main">
                 <b style={{ fontSize: 14 }}>{pull.card_name}</b>
                 <span style={{ color: pull.rarity === 'common' ? undefined : color, marginTop: 4 }}>
-                  {rarityLabel[pull.rarity] ?? pull.rarity}
+                  {pull.rarity_label}
                 </span>
               </span>
               <span style={{ textAlign: 'right', flex: 'none' }}>

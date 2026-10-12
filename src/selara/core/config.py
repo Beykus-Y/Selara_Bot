@@ -119,6 +119,7 @@ class Settings(BaseSettings):
     gacha_base_url: str = Field(default="", validation_alias="GACHA_BASE_URL")
     gacha_genshin_base_url: str = Field(default="", validation_alias="GACHA_GENSHIN_BASE_URL")
     gacha_hsr_base_url: str = Field(default="", validation_alias="GACHA_HSR_BASE_URL")
+    gacha_zzz_base_url: str = Field(default="", validation_alias="GACHA_ZZZ_BASE_URL")
     gacha_timeout_seconds: float = Field(default=10.0, validation_alias="GACHA_TIMEOUT_SECONDS")
     gacha_admin_user_id: int | None = Field(default=None, validation_alias="GACHA_ADMIN_USER_ID")
     gacha_admin_token: str = Field(default="", validation_alias="GACHA_ADMIN_TOKEN")
@@ -435,6 +436,7 @@ class Settings(BaseSettings):
         raw_value = {
             "genshin": self.gacha_genshin_base_url,
             "hsr": self.gacha_hsr_base_url,
+            "zzz": self.gacha_zzz_base_url,
         }.get(normalized_banner, "")
         if not raw_value:
             raw_value = self.gacha_base_url

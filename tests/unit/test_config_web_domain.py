@@ -34,6 +34,20 @@ def test_resolve_gacha_base_url_prefers_banner_specific_value() -> None:
     assert settings.resolve_gacha_base_url("genshin") == "http://127.0.0.1:8001"
 
 
+def test_resolve_gacha_base_url_uses_zzz_specific_value_without_common_base() -> None:
+    settings = Settings(
+        BOT_TOKEN="token",
+        DATABASE_URL="sqlite+aiosqlite:///tmp/test.db",
+        GACHA_BASE_URL="",
+        GACHA_GENSHIN_BASE_URL="genshin.example.com:9001",
+        GACHA_HSR_BASE_URL="hsr.example.com:9002",
+        GACHA_ZZZ_BASE_URL="zzz.example.com:9003/",
+    )
+
+    assert settings.resolve_gacha_base_url("zzz") == "http://zzz.example.com:9003"
+    assert settings.resolve_gacha_base_url("hsr") == "http://hsr.example.com:9002"
+
+
 def test_resolve_gacha_base_url_returns_none_without_config() -> None:
     settings = Settings(
         BOT_TOKEN="token",

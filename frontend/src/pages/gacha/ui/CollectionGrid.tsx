@@ -16,6 +16,8 @@ function getRarityClass(rarity: string): string {
 // Duplicate-stage prefixes match the bot: Genshin constellations, HSR eidolons, ZZZ mindscapes.
 const UPGRADE_PREFIX_BY_BANNER: Record<string, string> = { hsr: 'E', zzz: 'М' }
 const DEFAULT_UPGRADE_PREFIX = 'C'
+// The gacha service caps duplicate stages at 6; later copies are plain duplicates.
+const MAX_UPGRADE_STAGE = 6
 
 export function CollectionGrid({ cards, banner }: CollectionGridProps) {
   if (cards.length === 0) {
@@ -32,7 +34,7 @@ export function CollectionGrid({ cards, banner }: CollectionGridProps) {
     <div className="coll-grid">
       {cards.map((card) => {
         const rarityClass = getRarityClass(card.rarity)
-        const upgradeLevel = card.copies_owned - 1
+        const upgradeLevel = Math.min(card.copies_owned - 1, MAX_UPGRADE_STAGE)
         const constellationText = upgradeLevel > 0 ? (UPGRADE_PREFIX_BY_BANNER[banner] ?? DEFAULT_UPGRADE_PREFIX) + upgradeLevel : ''
 
         return (

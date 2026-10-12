@@ -10,6 +10,7 @@ class TextCommandResolutionError(ValueError):
 
 
 _GACHA_BANNER_ALIASES = gacha_banner_aliases()
+_GACHA_BANNER_CHOICES = "|".join(_GACHA_BANNER_ALIASES)
 
 
 def _parse_limit(raw: str, *, top_max: int) -> int:
@@ -115,8 +116,8 @@ def _parse_duration_seconds(token: str) -> int | None:
 
 
 def _parse_gacha_command(tokens: list[str]) -> CommandIntent | None:
-    usage = "Формат: гача генш|геншин|хср, моя гача генш|геншин|хср или гача инфо"
-    skip_usage = "Формат: гача скип генш|геншин|хср [@username]"
+    usage = f"Формат: гача {_GACHA_BANNER_CHOICES}, моя гача {_GACHA_BANNER_CHOICES} или гача инфо"
+    skip_usage = f"Формат: гача скип {_GACHA_BANNER_CHOICES} [@username]"
     toggle_usage = "Формат: гача вкл/выкл [5м|2ч|1д]"
 
     if len(tokens) >= 2 and tokens[0] == "гача" and tokens[1] == "админ":

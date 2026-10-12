@@ -992,7 +992,7 @@ def _write_backup_manifest(
 
 
 def _resolve_gacha_backup_base_url(settings: Settings) -> str | None:
-    for banner in ("", "genshin", "hsr"):
+    for banner in ("", "genshin", "hsr", "zzz"):
         resolved = settings.resolve_gacha_base_url(banner)
         if resolved:
             return resolved
