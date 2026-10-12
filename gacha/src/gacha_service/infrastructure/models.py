@@ -30,6 +30,20 @@ class PlayerBannerCooldownModel(Base):
     next_pull_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class PlayerBannerStatsModel(Base):
+    """Очки и опыт приключений игрока раздельно по каждой гаче.
+
+    Ранг не хранится: он всегда пересчитывается из `adventure_xp` через `resolve_rank`.
+    """
+
+    __tablename__ = "gacha_player_banner_stats"
+
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    banner: Mapped[str] = mapped_column(String(32), primary_key=True)
+    total_points: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    adventure_xp: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
 class PlayerBannerWalletModel(Base):
     __tablename__ = "gacha_player_banner_wallets"
 

@@ -50,6 +50,8 @@ def test_zzz_profile_wording_on_bot_side() -> None:
     assert text_commands._gacha_currency_button_label("zzz").startswith("+")
     assert "полихромов за" in text_commands._gacha_currency_button_label("zzz")
     assert text_commands._gacha_rank_label("zzz") == "Уровень Интернота"
+    assert profile.info_rank_label == "Уровень Интернота"
+    assert text_commands._gacha_info_rank_label("zzz") == "Уровень Интернота"
     assert text_commands._gacha_info_currency_label("zzz") == "Полихромы"
     assert gacha_use_case._gacha_currency_label("zzz") == "полихромов"
 
