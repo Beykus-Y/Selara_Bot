@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -701,44 +702,106 @@ async def test_render_reel_gif_fetches_images_and_excludes_landing_card_from_fil
     assert all(card.name != "Фурина" for card in filler_cards)
 
 
-@pytest.mark.asyncio
-async def test_render_reel_gif_offloads_pillow_rendering_to_a_thread(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pre-deploy audit finding (2026-08-19): Pillow rendering is
-    synchronous CPU-bound work (~4-10s) — calling it directly inside this
-    coroutine would freeze the entire bot's event loop (all users, all
-    chats) for the whole render, not just this one pull/warmup card. Must
-    run via asyncio.to_thread so the loop stays responsive."""
-    catalog = SimpleNamespace(
+def _render_test_catalog() -> SimpleNamespace:
+    return SimpleNamespace(
         cards=[
             SimpleNamespace(code="furina", name="Фурина", rarity="mythic", rarity_label="🟥", image_url="http://x/furina.png"),
             SimpleNamespace(code="amber", name="Эмбер", rarity="common", rarity_label="⬜", image_url="http://x/amber.png"),
         ]
     )
-    monkeypatch.setattr(orch, "_get_banner_catalog", AsyncMock(return_value=catalog))
+
+
+_RENDER_TEST_KWARGS = dict(
+    settings=SimpleNamespace(gacha_timeout_seconds=5.0),
+    banner="genshin",
+    landing_card_code="furina",
+    landing_card_name="Фурина",
+    landing_rarity_label="🟥 Мифическая",
+    landing_border_color=(230, 60, 70),
+)
+
+
+@pytest.mark.asyncio
+async def test_render_reel_gif_offloads_pillow_rendering_to_a_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pre-deploy audit finding (2026-08-19): Pillow rendering is
+    synchronous CPU-bound work (~4-10s) — calling it directly inside this
+    coroutine would freeze the entire bot's event loop (all users, all
+    chats) for the whole render, not just this one pull/warmup card. The
+    render must run in a worker thread so the loop stays responsive."""
+    monkeypatch.setattr(orch, "_get_banner_catalog", AsyncMock(return_value=_render_test_catalog()))
     monkeypatch.setattr(orch, "_fetch_bytes_cached", AsyncMock(return_value=b"img-bytes"))
-    monkeypatch.setattr(orch, "build_gacha_reel_animation", lambda **kwargs: b"final-gif")
+    render_threads: list[threading.Thread] = []
 
-    to_thread_calls = []
-    real_to_thread = asyncio.to_thread
+    def fake_build(**kwargs):
+        render_threads.append(threading.current_thread())
+        return b"final-gif"
 
-    async def spy_to_thread(func, *args, **kwargs):
-        to_thread_calls.append((func, args, kwargs))
-        return await real_to_thread(func, *args, **kwargs)
+    monkeypatch.setattr(orch, "build_gacha_reel_animation", fake_build)
 
-    monkeypatch.setattr(orch.asyncio, "to_thread", spy_to_thread)
-
-    result = await orch._render_reel_gif(
-        settings=SimpleNamespace(gacha_timeout_seconds=5.0),
-        banner="genshin",
-        landing_card_code="furina",
-        landing_card_name="Фурина",
-        landing_rarity_label="🟥 Мифическая",
-        landing_border_color=(230, 60, 70),
-    )
+    result = await orch._render_reel_gif(**_RENDER_TEST_KWARGS)
 
     assert result == b"final-gif"
-    assert len(to_thread_calls) == 1
-    assert to_thread_calls[0][0] is orch.build_gacha_reel_animation
+    assert len(render_threads) == 1
+    assert render_threads[0] is not threading.main_thread()
+
+
+@pytest.mark.asyncio
+async def test_pull_render_is_skipped_while_previous_render_thread_is_still_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two overlapping renders were enough to exceed the container's memory
+    limit (incident 2026-10-12). While the first render's thread is alive, a
+    user pull must not start a second one, and a warmup card must wait for it
+    instead of rendering on top of it."""
+    monkeypatch.setattr(orch, "_get_banner_catalog", AsyncMock(return_value=_render_test_catalog()))
+    monkeypatch.setattr(orch, "_fetch_bytes_cached", AsyncMock(return_value=b"img-bytes"))
+    release_first = threading.Event()
+    active = []
+    max_active = []
+    lock = threading.Lock()
+
+    def blocking_build(**kwargs):
+        with lock:
+            active.append(1)
+            max_active.append(len(active))
+        try:
+            release_first.wait(timeout=5)
+            return b"final-gif"
+        finally:
+            with lock:
+                active.pop()
+
+    monkeypatch.setattr(orch, "build_gacha_reel_animation", blocking_build)
+
+    first = asyncio.create_task(orch._render_reel_gif(**_RENDER_TEST_KWARGS))
+    await asyncio.sleep(0.05)  # the first render takes the slot and starts its thread
+    waiting = None
+    try:
+        with pytest.raises(orch.GachaRenderBusyError):
+            await orch._render_reel_gif(**_RENDER_TEST_KWARGS)
+        waiting = asyncio.create_task(orch._render_reel_gif(**_RENDER_TEST_KWARGS, wait_for_slot=True))
+        await asyncio.sleep(0.05)
+        assert not waiting.done()
+    finally:
+        release_first.set()
+
+    assert await first == b"final-gif"
+    assert await waiting == b"final-gif"
+    assert max(max_active) == 1
+
+
+@pytest.mark.asyncio
+async def test_render_reel_gif_releases_render_slot_after_a_failed_render(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(orch, "_get_banner_catalog", AsyncMock(return_value=_render_test_catalog()))
+    monkeypatch.setattr(orch, "_fetch_bytes_cached", AsyncMock(return_value=b"img-bytes"))
+
+    def failing_build(**kwargs):
+        raise RuntimeError("pillow exploded")
+
+    monkeypatch.setattr(orch, "build_gacha_reel_animation", failing_build)
+    with pytest.raises(RuntimeError, match="pillow exploded"):
+        await orch._render_reel_gif(**_RENDER_TEST_KWARGS)
+
+    monkeypatch.setattr(orch, "build_gacha_reel_animation", lambda **kwargs: b"final-gif")
+    assert await orch._render_reel_gif(**_RENDER_TEST_KWARGS) == b"final-gif"
 
 
 @pytest.mark.asyncio

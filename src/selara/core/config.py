@@ -131,6 +131,8 @@ class Settings(BaseSettings):
     gacha_admin_token: str = Field(default="", validation_alias="GACHA_ADMIN_TOKEN")
     gacha_service_token: str = Field(default="", validation_alias="GACHA_SERVICE_TOKEN")
     gacha_reel_cache_dir: str = Field(default="var/gacha_reel_cache", validation_alias="GACHA_REEL_CACHE_DIR")
+    # Off by default: the startup warmup renders every card's reel, and that memory peak is what OOM-killed the container.
+    gacha_warmup_enabled: bool = Field(default=False, validation_alias="GACHA_WARMUP_ENABLED")
     # Budget for one headless-Chromium HTML render (family tree image); a render past it fails with a user-facing reply.
     render_timeout_seconds: float = Field(default=15.0, ge=1.0, le=120.0, validation_alias="RENDER_TIMEOUT_SECONDS")
     backup_timeout_seconds: float = Field(default=300.0, validation_alias="BACKUP_TIMEOUT_SECONDS")

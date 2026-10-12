@@ -55,6 +55,7 @@ from selara.application.use_cases.gacha import (
 )
 from selara.application.use_cases.economy.common import get_account_or_error, resolve_scope_or_error
 from selara.presentation.gacha_reel_orchestration import (
+    GachaRenderBusyError,
     cache_reel_variant_after_send,
     is_gacha_animation_cache_ready,
     resolve_gacha_reel_animation,
@@ -2761,6 +2762,12 @@ async def _try_send_gacha_pull_animation(
             await bot.delete_message(chat_id=message.chat.id, message_id=sent.message_id)
         except TelegramBadRequest:
             pass
+    except GachaRenderBusyError:
+        # Another pull is already rendering. Waiting for it would hold this update, so the instant result goes out now.
+        logger.info(
+            "Gacha reel render already running, delivering instant result",
+            extra={"chat_id": getattr(message.chat, "id", None), "banner": banner},
+        )
     except Exception:
         logger.warning(
             "Gacha reel animation failed, falling back to instant result",

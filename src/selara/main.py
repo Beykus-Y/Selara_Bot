@@ -245,9 +245,13 @@ async def _run_bot(settings, session_factory) -> None:
         )
     else:
         logger.warning("Daily backup scheduler is disabled because ADMIN_USER_ID is not configured.")
-    gacha_warmup_task = asyncio.create_task(
-        _run_gacha_animation_warmup(settings, bot, session_factory), name="gacha-animation-warmup"
-    )
+    gacha_warmup_task = None
+    if settings.gacha_warmup_enabled:
+        gacha_warmup_task = asyncio.create_task(
+            _run_gacha_animation_warmup(settings, bot, session_factory), name="gacha-animation-warmup"
+        )
+    else:
+        logger.info("Gacha animation warmup is disabled (GACHA_WARMUP_ENABLED is false).")
     chat_member_snapshot_task = asyncio.create_task(
         run_chat_member_count_snapshot_scheduler(bot=bot, session_factory=session_factory),
         name="chat-member-count-snapshots",
@@ -307,8 +311,9 @@ async def _run_bot(settings, session_factory) -> None:
         if backup_task is not None:
             backup_task.cancel()
             await asyncio.gather(backup_task, return_exceptions=True)
-        gacha_warmup_task.cancel()
-        await asyncio.gather(gacha_warmup_task, return_exceptions=True)
+        if gacha_warmup_task is not None:
+            gacha_warmup_task.cancel()
+            await asyncio.gather(gacha_warmup_task, return_exceptions=True)
         chat_member_snapshot_task.cancel()
         await asyncio.gather(chat_member_snapshot_task, return_exceptions=True)
         market_expiry_task.cancel()
