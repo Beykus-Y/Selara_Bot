@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -12,14 +13,34 @@ from selara.application.achievements import (
 )
 from selara.core.config import get_settings
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository, SqlAlchemyEconomyRepository
+from selara.infrastructure.db.session import DatabaseAdmission
 from selara.infrastructure.db.web_auth import SqlAlchemyWebAuthRepository
+
+logger = logging.getLogger(__name__)
 
 
 class DBSessionMiddleware(BaseMiddleware):
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        admission: DatabaseAdmission | None = None,
+    ) -> None:
         self._session_factory = session_factory
+        self._admission = admission
 
     async def __call__(
+        self,
+        handler: Callable[[Any, dict[str, Any]], Awaitable[Any]],
+        event: Any,
+        data: dict[str, Any],
+    ) -> Any:
+        if self._admission is None:
+            return await self._handle_with_session(handler, event, data)
+        # The slot is taken before the session, so an update that waits here holds no pooled connection.
+        async with self._admission.slot():
+            return await self._handle_with_session(handler, event, data)
+
+    async def _handle_with_session(
         self,
         handler: Callable[[Any, dict[str, Any]], Awaitable[Any]],
         event: Any,
@@ -43,8 +64,17 @@ class DBSessionMiddleware(BaseMiddleware):
             try:
                 result = await handler(event, data)
             except Exception:
-                await session.rollback()
+                await _rollback_failed_update(session)
                 raise
 
             await session.commit()
             return result
+
+
+async def _rollback_failed_update(session: AsyncSession) -> None:
+    # The handler's exception is the one to report. A rollback that fails too must not replace it. Closing the
+    # session still returns the connection to the pool, which discards it when it is broken.
+    try:
+        await session.rollback()
+    except Exception:
+        logger.warning("Rollback after a failed update did not complete", exc_info=True)

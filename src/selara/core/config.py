@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     error_alert_chat_id: int | None = Field(default=None, validation_alias="ERROR_ALERT_CHAT_ID")
     db_pool_size: int = Field(default=10, validation_alias="DB_POOL_SIZE")
     db_max_overflow: int = Field(default=20, validation_alias="DB_MAX_OVERFLOW")
+    # Pool waits and connect/command timeouts bound how long one stalled operation can hold a pool slot.
+    db_pool_timeout_seconds: float = Field(default=30.0, validation_alias="DB_POOL_TIMEOUT_SECONDS", gt=0)
+    db_connect_timeout_seconds: float = Field(default=10.0, validation_alias="DB_CONNECT_TIMEOUT_SECONDS", gt=0)
+    db_command_timeout_seconds: float = Field(default=120.0, validation_alias="DB_COMMAND_TIMEOUT_SECONDS", gt=0)
+    # Updates that may hold a pooled connection at once. Kept below pool capacity so a burst waits in memory.
+    db_max_concurrent_updates: int = Field(default=20, validation_alias="DB_MAX_CONCURRENT_UPDATES", ge=1)
     redis_url: str = Field(default="redis://localhost:6379/0", validation_alias="REDIS_URL")
     game_state_ttl_hours: int = Field(default=24, validation_alias="GAME_STATE_TTL_HOURS")
     activity_batch_flush_seconds: int = Field(default=5, validation_alias="ACTIVITY_BATCH_FLUSH_SECONDS")

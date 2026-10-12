@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from selara.infrastructure.db.models import AdminRuntimeSettingsModel
 from selara.infrastructure.db.models import OperationalAlertModel
+from selara.infrastructure.db.session import DatabaseFailure, classify_database_failure, describe_session_pool
 from selara.infrastructure.security.redaction import redact_sensitive_text
 from selara.presentation.chat_migration import apply_chat_migration, extract_migration_ids_from_exception
 from selara.presentation.middlewares.error_alert_config import configure_error_alerts, get_error_alert_config
@@ -37,7 +38,13 @@ def _sanitize_operational_alert(text: str) -> str:
 
 
 async def notify_operational_error(
-    *, session_factory: async_sessionmaker[AsyncSession] | None, event: Any, exc: Exception, bot: Any = None
+    *,
+    session_factory: async_sessionmaker[AsyncSession] | None,
+    event: Any,
+    exc: Exception,
+    bot: Any = None,
+    database_failure: DatabaseFailure | None = None,
+    pool_status: str | None = None,
 ) -> None:
     settings = get_error_alert_config()
     try:
@@ -68,6 +75,10 @@ async def notify_operational_error(
             f"Ошибка: {type(exc).__name__}: {str(exc)[:500]}",
             f"Отпечаток: {fingerprint}",
         ]
+        if database_failure is not None:
+            lines.append(f"Категория БД: {database_failure.category} (стадия: {database_failure.stage})")
+            if pool_status is not None:
+                lines.append(f"Пул БД: {pool_status}")
         if frames:
             formatted_traceback = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-2200:]
             lines.extend(["", "Traceback:", formatted_traceback])
@@ -80,7 +91,9 @@ async def notify_operational_error(
             sanitized_traceback = redact_sensitive_text(
                 "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
             )[-12000:]
-        if session_factory is not None:
+        # A database failure usually means the pool is the problem, so the write below would wait for the same
+        # pool. Those alerts go to Telegram only; the log line carries the category and the pool counters.
+        if session_factory is not None and database_failure is None:
             try:
                 async with session_factory() as session:
                     session.add(
@@ -201,18 +214,40 @@ class ErrorHandlerMiddleware(BaseMiddleware):
             await self._notify_admin(event=event, data=data, exc=exc)
             return None
         except Exception as exc:
-            logger.exception("Unhandled exception while processing update")
-            await self._notify_admin(event=event, data=data, exc=exc)
+            database_failure = classify_database_failure(exc)
+            if database_failure is None:
+                logger.exception("Unhandled exception while processing update")
+            else:
+                logger.error(
+                    "Database failure while processing update",
+                    exc_info=exc,
+                    extra={
+                        "db_failure_category": database_failure.category,
+                        "db_failure_stage": database_failure.stage,
+                        "db_pool": describe_session_pool(data.get("db_session")),
+                        "event_type": type(event).__name__,
+                    },
+                )
+            await self._notify_admin(event=event, data=data, exc=exc, database_failure=database_failure)
             await self._send_fallback_error(event=event, data=data)
             return None
 
-    async def _notify_admin(self, *, event: Any, data: dict[str, Any], exc: Exception) -> None:
+    async def _notify_admin(
+        self,
+        *,
+        event: Any,
+        data: dict[str, Any],
+        exc: Exception,
+        database_failure: DatabaseFailure | None = None,
+    ) -> None:
         task = asyncio.create_task(
             notify_operational_error(
                 session_factory=self._session_factory,
                 event=event,
                 exc=exc,
                 bot=data.get("bot"),
+                database_failure=database_failure,
+                pool_status=describe_session_pool(data.get("db_session")) if database_failure is not None else None,
             )
         )
         _pending_alert_tasks.add(task)
