@@ -367,9 +367,16 @@ class TestZzzBannerConfig:
             assert card["image_url"] == f"/images/zzz/{card['code']}.jpg"
 
     def test_missing_zzz_artwork_falls_back_to_placeholder(self):
-        from gacha_service.application.catalog import PLACEHOLDER_IMAGE_URL, _resolve_card_image_url
+        from gacha_service.application.catalog import PLACEHOLDER_IMAGE_URL, resolve_card_image_url
 
-        assert _resolve_card_image_url("/images/zzz/not_uploaded_yet.jpg") == PLACEHOLDER_IMAGE_URL
+        assert resolve_card_image_url("/images/zzz/not_uploaded_yet.jpg") == PLACEHOLDER_IMAGE_URL
         assert (IMAGES_DIR / "placeholder.jpg").is_file()
-        assert _resolve_card_image_url(PLACEHOLDER_IMAGE_URL) == PLACEHOLDER_IMAGE_URL
-        assert _resolve_card_image_url("https://example.com/card.png") == "https://example.com/card.png"
+        assert resolve_card_image_url(PLACEHOLDER_IMAGE_URL) == PLACEHOLDER_IMAGE_URL
+        assert resolve_card_image_url("https://example.com/card.png") == "https://example.com/card.png"
+
+    def test_zzz_config_keeps_canonical_artwork_urls(self, zzz_config):
+        # The placeholder is applied at response time only, so stored pulls keep the real path.
+        from gacha_service.application.catalog import get_banner_config
+
+        rina = next(card for card in get_banner_config("zzz").cards if card.code == "rina")
+        assert rina.image_url == "/images/zzz/rina.jpg"

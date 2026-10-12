@@ -85,6 +85,22 @@ _PROFILES: dict[str, BannerProfile] = {
 }
 
 
+# Neutral defaults for banners without a profile. These match what the code used before
+# profiles existed: Genshin-style terms, no duplicate stages, no origin block, generic heading.
+_DEFAULT = BannerProfile(
+    xp_label="Опыт приключений",
+    rank_label="Ранг приключений",
+    currency_label="Примогемы",
+    progression_reward_label="созвездие",
+    duplicate_stage_prefix=None,
+    shows_origin=False,
+    profile_heading=None,
+    profile_rank_label="Ранг",
+    profile_currency_label="Примогемы",
+    rarity_labels=dict(RARITY_LABELS),
+    rarity_summary_labels=dict(RARITY_SUMMARY_LABELS),
+)
+
+
 def get_banner_profile(banner: str) -> BannerProfile:
-    # Unknown banners fall back to the Genshin wording, as the banner code path always did.
-    return _PROFILES.get(banner, _GENSHIN)
+    return _PROFILES.get(banner, _DEFAULT)

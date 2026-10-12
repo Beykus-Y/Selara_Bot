@@ -54,16 +54,22 @@ PLACEHOLDER_IMAGE_URL = "/images/placeholder.jpg"
 _IMAGES_URL_PREFIX = "/images/"
 
 
-def _resolve_card_image_url(image_url: str) -> str:
-    """Use the shared placeholder while a card's artwork file is not uploaded yet.
+@lru_cache(maxsize=None)
+def _local_image_exists(relative_path: str) -> bool:
+    return (settings.images_dir / relative_path).is_file()
 
-    Artwork is expected at /images/<banner>/<code>.jpg, so adding a file is enough to
-    replace the placeholder after the next deploy, which ships the images directory.
+
+def resolve_card_image_url(image_url: str) -> str:
+    """Return the URL to show for a card image.
+
+    Cards keep their canonical /images/<banner>/<code>.jpg URL in config and in stored
+    pull history. Only the response uses the shared placeholder while that file is not
+    uploaded yet, so adding the artwork later fixes old pulls too.
     """
     if not image_url.startswith(_IMAGES_URL_PREFIX):
         return image_url
     relative_path = image_url.removeprefix(_IMAGES_URL_PREFIX)
-    if (settings.images_dir / relative_path).is_file():
+    if _local_image_exists(relative_path):
         return image_url
     return PLACEHOLDER_IMAGE_URL
 
@@ -83,8 +89,6 @@ def _load_all_banners() -> dict[str, BannerConfig]:
     banners: dict[str, BannerConfig] = {}
     for path in sorted(config_dir.glob("*.json")):
         config = _load_banner_file(path)
-        for card in config.cards:
-            card.image_url = _resolve_card_image_url(card.image_url)
         banners[config.code] = config
     return banners
 
@@ -124,7 +128,8 @@ def get_banner_catalog_etag(banner: str) -> str:
     GET (ETag) so a client-side cache never serves a stale catalog past the
     next deploy, per docs/GACHA_MODERNIZATION_TODO.md, Этап 3 caching work."""
     config = get_banner_config(banner)
-    canonical = config.model_dump_json()
+    # Resolved image URLs are part of the response, so a deploy that adds artwork changes the ETag.
+    canonical = config.model_dump_json() + "".join(resolve_card_image_url(card.image_url) for card in config.cards)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 

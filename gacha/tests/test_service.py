@@ -924,6 +924,17 @@ def test_resolve_public_image_url_builds_vps_link() -> None:
     assert image_url == "http://127.0.0.1:8001/images/genshin/amber.jpg"
 
 
+def test_unprofiled_banner_keeps_neutral_defaults() -> None:
+    from gacha_service.domain.banner_profiles import get_banner_profile
+
+    profile = get_banner_profile("custom_banner")
+
+    assert profile.duplicate_stage_prefix is None
+    assert profile.shows_origin is False
+    assert profile.profile_heading is None
+    assert profile.progression_reward_label == "созвездие"
+
+
 def test_zzz_profile_uses_zzz_terms_and_rarity_labels() -> None:
     from gacha_service.domain.banner_profiles import get_banner_profile
 

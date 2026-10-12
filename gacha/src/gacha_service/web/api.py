@@ -14,6 +14,7 @@ from gacha_service.application.catalog import (
     get_banner_config,
     get_card_for_banner,
     get_cards_for_banner,
+    resolve_card_image_url,
 )
 from gacha_service.application.service import GachaService
 from gacha_service.config import settings
@@ -245,7 +246,7 @@ def _to_history_payload(entry) -> HistoryEntryPayload:
         points=entry.points,
         primogems=entry.primogems,
         adventure_xp_gained=entry.adventure_xp,
-        image_url=entry.image_url,
+        image_url=resolve_card_image_url(entry.image_url),
         region_code=region_code,
         element_code=element_code,
         region_label=region_label,
@@ -254,6 +255,7 @@ def _to_history_payload(entry) -> HistoryEntryPayload:
 
 
 def _resolve_public_image_url(request: Request, image_url: str) -> str:
+    image_url = resolve_card_image_url(image_url)
     if image_url.startswith("http://") or image_url.startswith("https://"):
         return image_url
     base_url = str(request.base_url).rstrip("/")
