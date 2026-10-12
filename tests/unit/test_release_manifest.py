@@ -45,11 +45,28 @@ def test_manifest_is_bound_to_publisher_repository_and_namespace():
             release.validate_manifest(data, **kwargs)
 
 
+class FakeClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+@pytest.fixture
+def clock():
+    return FakeClock()
+
+
 class DockerFake:
-    def __init__(self, data, *, mismatch=None, health_fail=False):
+    def __init__(self, data, *, mismatch=None, health_fail=False, health_failures=0):
         self.data = data
         self.mismatch = mismatch
         self.health_fail = health_fail
+        self.health_failures = health_failures
         self.calls = []
 
     def __call__(self, *args, env):
@@ -77,38 +94,41 @@ class DockerFake:
             }])
         if args[:3] == ("exec", "web-container", "sha256sum"):
             return hashlib.sha256(b'<html><div id="root"></div></html>\n').hexdigest() + "  index.html\n"
+        if args[:2] == ("exec", "app-container") and self.health_failures:
+            self.health_failures -= 1
+            raise subprocess.CalledProcessError(1, args)
         if args[0] == "exec" and self.health_fail:
             raise subprocess.CalledProcessError(1, args)
         return ""
 
 
-def test_repeated_deploy_uses_exact_digests_and_retains_previous_release(tmp_path, monkeypatch):
+def test_repeated_deploy_uses_exact_digests_and_retains_previous_release(tmp_path, monkeypatch, clock):
     monkeypatch.setenv("SELARA_IMAGE", "ghcr.io/other/selara:latest")
     old = manifest(100)
     release.atomic_json(tmp_path / "current.json", old)
     new = manifest(123)
     runner = DockerFake(new)
     for _ in range(2):
-        record = release.deploy_release(new, tmp_path, runner=runner, sleeper=lambda _: None)
+        record = release.deploy_release(new, tmp_path, runner=runner, clock=clock, sleeper=clock.sleep)
         assert json.loads((tmp_path / "previous.json").read_text()) == old
         assert json.loads((tmp_path / "current.json").read_text()) == new
         assert record["containers"]["artifact-renderer"]["image"] == new["images"]["app"]
     assert ("compose", "up", "-d", "--no-build", "--pull", "never", "app", "web", "artifact-renderer") in runner.calls
     assert all("build" not in command for command in runner.calls)
     # A previous manifest can be deployed as-is without resolving moving tags.
-    release.deploy_release(old, tmp_path, runner=DockerFake(old), sleeper=lambda _: None)
+    release.deploy_release(old, tmp_path, runner=DockerFake(old), clock=clock, sleeper=clock.sleep)
     assert json.loads((tmp_path / "current.json").read_text()) == old
     assert json.loads((tmp_path / "previous.json").read_text()) == new
 
 
 @pytest.mark.parametrize("mismatch", ["digest", "revision", "container-id", "container-ref", "stopped"])
-def test_image_mismatch_never_promotes_release(tmp_path, mismatch):
+def test_image_mismatch_never_promotes_release(tmp_path, mismatch, clock):
     old = manifest(100)
     release.atomic_json(tmp_path / "current.json", old)
     new = manifest()
     runner = DockerFake(new, mismatch=mismatch)
     with pytest.raises(ValueError):
-        release.deploy_release(new, tmp_path, runner=runner, sleeper=lambda _: None)
+        release.deploy_release(new, tmp_path, runner=runner, clock=clock, sleeper=clock.sleep)
     assert json.loads((tmp_path / "current.json").read_text()) == old
     assert not (tmp_path / "previous.json").exists()
     assert not (tmp_path / "last-deployment.json").exists()
@@ -116,14 +136,29 @@ def test_image_mismatch_never_promotes_release(tmp_path, mismatch):
         assert not any(command[:2] == ("compose", "up") for command in runner.calls)
 
 
-def test_failed_health_check_preserves_known_release(tmp_path):
+def test_slow_startup_within_deadline_is_not_a_false_failure(tmp_path, clock):
+    old = manifest(100)
+    release.atomic_json(tmp_path / "current.json", old)
+    new = manifest()
+    # Eight refused connections (about 40 seconds) happen before the app opens its port.
+    runner = DockerFake(new, health_failures=8)
+    release.deploy_release(new, tmp_path, runner=runner, clock=clock, sleeper=clock.sleep)
+    assert clock.now == 40
+    assert json.loads((tmp_path / "current.json").read_text()) == new
+    assert json.loads((tmp_path / "previous.json").read_text()) == old
+
+
+def test_persistent_health_failure_stops_at_deadline_and_preserves_known_release(tmp_path, clock):
     old = manifest(100)
     release.atomic_json(tmp_path / "current.json", old)
     runner = DockerFake(manifest(), health_fail=True)
     with pytest.raises(subprocess.CalledProcessError):
-        release.deploy_release(manifest(), tmp_path, runner=runner, sleeper=lambda _: None)
+        release.deploy_release(manifest(), tmp_path, runner=runner, clock=clock, sleeper=clock.sleep)
     assert json.loads((tmp_path / "current.json").read_text()) == old
-    assert len([call for call in runner.calls if call[:2] == ("exec", "app-container")]) == 6
+    assert not (tmp_path / "previous.json").exists()
+    assert clock.now == release.HEALTH_TIMEOUT_SECONDS
+    probes = [call for call in runner.calls if call[:2] == ("exec", "app-container")]
+    assert len(probes) == release.HEALTH_TIMEOUT_SECONDS // release.HEALTH_INTERVAL_SECONDS + 1
 
 
 def test_known_release_id_cannot_be_rebound_to_new_digest(tmp_path):
@@ -153,8 +188,8 @@ def test_renderer_exit_during_app_start_does_not_promote(tmp_path):
     assert json.loads((tmp_path / "current.json").read_text()) == old
 
 
-@pytest.mark.parametrize("failure", [None, "public-not-ready", "wrong-frontend", "game-store-degraded"])
-def test_deploy_probes_local_and_public_readiness_and_exact_frontend(tmp_path, monkeypatch, failure):
+@pytest.mark.parametrize("failure", [None, "public-not-ready", "redis-down", "wrong-frontend", "game-store-degraded"])
+def test_deploy_probes_local_and_public_readiness_and_exact_frontend(tmp_path, monkeypatch, clock, failure):
     import urllib.request
 
     monkeypatch.setenv("WEB_BASE_URL", "https://bot.example.com/")
@@ -168,7 +203,8 @@ def test_deploy_probes_local_and_public_readiness_and_exact_frontend(tmp_path, m
         else:
             # Mirrors /readyz: game_store_redis is informational and always reported.
             body = json.dumps({"status": "ok", "checks": {
-                "database": True, "redis": True,
+                "database": True,
+                "redis": not (failure == "redis-down" and "example.com" in url),
                 "polling": not (failure == "public-not-ready" and "example.com" in url),
                 "game_store_redis": "degraded" if failure == "game-store-degraded" else "connected",
             }}).encode()
@@ -186,12 +222,12 @@ def test_deploy_probes_local_and_public_readiness_and_exact_frontend(tmp_path, m
                 raise subprocess.CalledProcessError(1, args) from error
         return result
 
-    if failure in {"public-not-ready", "wrong-frontend"}:
+    if failure in {"public-not-ready", "redis-down", "wrong-frontend"}:
         with pytest.raises(subprocess.CalledProcessError):
-            release.deploy_release(manifest(), tmp_path, runner=probe_runner, sleeper=lambda _: None)
+            release.deploy_release(manifest(), tmp_path, runner=probe_runner, clock=clock, sleeper=clock.sleep)
         assert not (tmp_path / "current.json").exists()
     else:
-        release.deploy_release(manifest(), tmp_path, runner=probe_runner)
+        release.deploy_release(manifest(), tmp_path, runner=probe_runner, clock=clock, sleeper=clock.sleep)
         assert {"http://127.0.0.1:8080/readyz", "https://bot.example.com/miniapp/readyz", "https://bot.example.com/miniapp/"} <= set(visited)
 
 

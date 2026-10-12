@@ -6,9 +6,12 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import time
 
 
+HEALTH_TIMEOUT_SECONDS = 120
+HEALTH_INTERVAL_SECONDS = 5
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 OWNER = re.compile(r"[a-z0-9][a-z0-9._-]*\Z")
@@ -72,7 +75,30 @@ def docker(*args: str, env: dict) -> str:
                           stdout=subprocess.PIPE, timeout=600).stdout
 
 
-def deploy_release(manifest: dict, state_dir: Path, *, runner=docker, sleeper=time.sleep) -> dict:
+def wait_for_gate(gate: str, command: str, *, runner, env: dict, container_id: str,
+                  clock, sleeper) -> None:
+    """Retry one readiness gate until the deadline; the last failure is raised."""
+    started = clock()
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            runner("exec", container_id, "python", "-c", command, env=env)
+        except subprocess.CalledProcessError:
+            elapsed = clock() - started
+            remaining = max(HEALTH_TIMEOUT_SECONDS - elapsed, 0)
+            print(f"{gate}: probe {attempt} failed after {elapsed:.0f}s, {remaining:.0f}s left",
+                  file=sys.stderr)
+            if remaining <= 0:
+                raise
+            sleeper(min(HEALTH_INTERVAL_SECONDS, remaining))
+        else:
+            print(f"{gate}: ready after {attempt} probe(s) in {clock() - started:.0f}s", file=sys.stderr)
+            return
+
+
+def deploy_release(manifest: dict, state_dir: Path, *, runner=docker, sleeper=time.sleep,
+                   clock=time.monotonic) -> dict:
     """Call with an exclusive deployment lock held; promote only verified releases."""
     validate_manifest(manifest)
     current = state_dir / "current.json"
@@ -114,24 +140,31 @@ def deploy_release(manifest: dict, state_dir: Path, *, runner=docker, sleeper=ti
                         "/usr/share/nginx/html/index.html", env=env).split()[0]
     if not re.fullmatch(r"[0-9a-f]{64}", index_hash):
         raise ValueError("Invalid deployed frontend checksum")
-    health_command = (
-        "import hashlib, json, os, urllib.request; "
-        "port = int(os.environ.get('WEB_PORT', '8080')); "
-        "urllib.request.urlopen(f'http://127.0.0.1:{port}/readyz', timeout=5).read(); "
-        "base = os.environ['WEB_BASE_URL'].rstrip('/'); "
-        "ready = json.loads(urllib.request.urlopen(base + '/miniapp/readyz', timeout=5).read()); "
-        "assert ready['status'] == 'ok' and all(ready['checks'][key] for key in ('database', 'redis', 'polling')); "
-        "page = urllib.request.urlopen(base + '/miniapp/', timeout=5).read(); "
-        f"assert hashlib.sha256(page).hexdigest() == '{index_hash}', 'Public frontend build mismatch'"
+    # Each gate is retried until HEALTH_TIMEOUT_SECONDS so a slow cold start is not a failed deploy,
+    # and a gate that never passes names itself in the log before the release is refused.
+    gates = (
+        ("local readiness", (
+            "import os, urllib.request; "
+            "port = int(os.environ.get('WEB_PORT', '8080')); "
+            "urllib.request.urlopen(f'http://127.0.0.1:{port}/readyz', timeout=5).read()"
+        )),
+        ("public readiness", (
+            "import json, os, urllib.request; "
+            "base = os.environ['WEB_BASE_URL'].rstrip('/'); "
+            "ready = json.loads(urllib.request.urlopen(base + '/miniapp/readyz', timeout=5).read()); "
+            "assert ready['status'] == 'ok' and all(ready['checks'][key] for key in ('database', 'redis', 'polling')), "
+            "'Public readiness is not ok'"
+        )),
+        ("public frontend", (
+            "import hashlib, os, urllib.request; "
+            "base = os.environ['WEB_BASE_URL'].rstrip('/'); "
+            "page = urllib.request.urlopen(base + '/miniapp/', timeout=5).read(); "
+            f"assert hashlib.sha256(page).hexdigest() == '{index_hash}', 'Public frontend build mismatch'"
+        )),
     )
-    for attempt in range(6):
-        try:
-            runner("exec", app_id, "python", "-c", health_command, env=env)
-            break
-        except subprocess.CalledProcessError:
-            if attempt == 5:
-                raise
-            sleeper(5)
+    for gate, command in gates:
+        wait_for_gate(gate, command, runner=runner, env=env, container_id=app_id,
+                      clock=clock, sleeper=sleeper)
     # A web/renderer process can exit while the app is starting.
     for service, expected in containers.items():
         container = json.loads(runner("inspect", expected["container_id"], env=env))[0]
