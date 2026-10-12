@@ -43,6 +43,27 @@ async def test_render_timeout_raises_render_timeout_error_and_recycles_browser(m
     assert renderer._render_count == 1
 
 
+async def test_render_timeout_error_survives_failed_browser_recycle(monkeypatch) -> None:
+    launches: list[int] = []
+
+    async def flaky_ensure_browser_started(self) -> None:
+        launches.append(1)
+        if len(launches) > 1:
+            raise RuntimeError("Chromium failed to relaunch")
+        self._browser = _fake_browser()
+
+    monkeypatch.setattr(PlaywrightRendererService, "_ensure_browser_started", flaky_ensure_browser_started)
+    monkeypatch.setattr(PlaywrightRendererService, "_do_render", _stalled_render)
+
+    renderer = PlaywrightRendererService(render_timeout_seconds=0.05)
+
+    with pytest.raises(RenderTimeoutError):
+        await renderer.render_html("<p>slow</p>", width=100, height=100)
+
+    assert renderer._browser is None
+    assert len(launches) == 2
+
+
 async def test_renderer_recovers_with_real_browser_after_timeout() -> None:
     renderer = PlaywrightRendererService(render_timeout_seconds=0.2)
     await renderer.start()

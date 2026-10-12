@@ -11,6 +11,7 @@ from selara.core.config import get_settings
 logger = logging.getLogger(__name__)
 
 DEFAULT_RENDER_TIMEOUT_SECONDS = 15.0
+RECYCLE_TIMEOUT_SECONDS = 20.0
 
 
 class RenderTimeoutError(RuntimeError):
@@ -154,9 +155,15 @@ class PlaywrightRendererService:
                     "HTML rendering timed out after %ss while in phase %s; completed phases: %s",
                     budget, trace.phase, trace.summary(),
                 )
-                # Force-recycle browser under lock on timeout to ensure no hanging pages
+                # Force-recycle browser under lock on timeout to ensure no hanging pages.
+                # A failed or hung recycle must not replace the timeout error; the next render relaunches the browser.
                 async with self._lock:
-                    await self._recycle_browser()
+                    try:
+                        async with asyncio.timeout(RECYCLE_TIMEOUT_SECONDS):
+                            await self._recycle_browser()
+                    except Exception as e:
+                        logger.error("Browser recycle after render timeout failed: %s", e)
+                        self._browser = None
                 raise RenderTimeoutError(f"Rendering timed out after {budget:g} seconds.") from None
             except Exception as e:
                 logger.exception("Rendering failed due to error: %s", e)
