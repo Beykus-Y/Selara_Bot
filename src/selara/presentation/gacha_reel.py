@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import contextlib
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-from typing import Sequence
+from typing import Iterable, Iterator, Sequence
 
 from PIL import Image, ImageDraw
 
@@ -26,49 +28,86 @@ _HIGHLIGHT_WIDTH = 6
 # Constant output framerate for the MP4 encode — source frames have variable
 # hold durations (see _build_duration_schedule), so each source frame is
 # repeated round(duration_ms * _MP4_FPS / 1000) times to approximate the same
-# timing at a fixed fps (required by the image2pipe -> H.264 pipeline).
+# timing at a fixed fps (required by the rawvideo -> H.264 pipeline).
 _MP4_FPS = 30
+
+# Deadline for one encode, frame composition included. ffmpeg is killed when it passes.
+_ENCODE_TIMEOUT_SECONDS = 60.0
 
 
 class GachaReelEncodeError(RuntimeError):
     pass
 
 
-def _encode_frames_to_mp4(frames: list[Image.Image], durations: list[int]) -> bytes:
+def _write_raw_frames(
+    stdin, frames: Iterable[Image.Image], durations: Sequence[int], *, stop: threading.Event
+) -> None:
+    for frame, duration_ms in zip(frames, durations):
+        if stop.is_set():
+            return
+        repeat = max(1, round(duration_ms * _MP4_FPS / 1000))
+        payload = frame.convert("RGB").tobytes()
+        for _ in range(repeat):
+            stdin.write(payload)
+
+
+def _encode_frames_to_mp4(frames: Iterable[Image.Image], durations: Sequence[int]) -> bytes:
     """MP4 (H.264, no audio) instead of GIF: at this resolution/duration a
     GIF landed around 9-11MB, and Telegram clients showed files that large
     as a downloadable document instead of an inline-autoplay animation.
     MP4 is Telegram's own recommended format for send_animation and encodes
-    the same visual content far smaller (found live, 2026-08-19)."""
-    stdin_payload = BytesIO()
-    for frame, duration_ms in zip(frames, durations):
-        repeat = max(1, round(duration_ms * _MP4_FPS / 1000))
-        frame_bytes = BytesIO()
-        frame.convert("RGB").save(frame_bytes, format="PNG")
-        frame_png = frame_bytes.getvalue()
-        for _ in range(repeat):
-            stdin_payload.write(frame_png)
+    the same visual content far smaller (found live, 2026-08-19).
 
-    with tempfile.TemporaryDirectory() as tmpdir:
+    Frames are written to ffmpeg as raw RGB as they are composed. Keeping
+    every frame, or a PNG copy of each, in memory is what took one render to
+    about 0.85 GB. One x264 thread keeps a render from taking both vCPUs."""
+    with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryFile() as stderr_file:
         output_path = Path(tmpdir) / "reel.mp4"
-        result = subprocess.run(
+        process = subprocess.Popen(
             [
                 "ffmpeg", "-y", "-loglevel", "error",
-                "-f", "image2pipe", "-vcodec", "png", "-framerate", str(_MP4_FPS),
+                "-f", "rawvideo", "-pix_fmt", "rgb24",
+                "-s", f"{_CANVAS_SIZE[0]}x{_CANVAS_SIZE[1]}", "-framerate", str(_MP4_FPS),
                 "-i", "-",
                 "-vf", "format=yuv420p",
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-threads", "1",
                 "-movflags", "+faststart",
                 str(output_path),
             ],
-            input=stdin_payload.getvalue(),
-            capture_output=True,
-            timeout=60,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=stderr_file,
         )
-        if result.returncode != 0 or not output_path.exists():
-            raise GachaReelEncodeError(
-                f"ffmpeg failed (exit {result.returncode}): {result.stderr.decode('utf-8', errors='replace')[:500]}"
-            )
+        stop = threading.Event()
+
+        def _stop_ffmpeg() -> None:
+            stop.set()
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
+
+        # A stalled ffmpeg stops reading stdin, and only a kill from outside can unblock the write.
+        watchdog = threading.Timer(_ENCODE_TIMEOUT_SECONDS, _stop_ffmpeg)
+        watchdog.daemon = True
+        watchdog.start()
+        try:
+            try:
+                _write_raw_frames(process.stdin, frames, durations, stop=stop)
+                process.stdin.close()
+            except OSError:
+                # ffmpeg exited early or was killed; its exit status and stderr below say why.
+                pass
+            returncode = process.wait()
+        finally:
+            watchdog.cancel()
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+        if stop.is_set():
+            raise GachaReelEncodeError(f"ffmpeg did not finish within {_ENCODE_TIMEOUT_SECONDS:g}s")
+        stderr_file.seek(0)
+        error_text = stderr_file.read(500).decode("utf-8", errors="replace")
+        if returncode != 0 or not output_path.exists():
+            raise GachaReelEncodeError(f"ffmpeg failed (exit {returncode}): {error_text}")
         return output_path.read_bytes()
 
 
@@ -172,25 +211,27 @@ def build_gacha_reel_animation(
     durations = _build_duration_schedule(frame_count=_FRAME_COUNT, total_ms=_TOTAL_DURATION_MS)
 
     paste_x = (background.width - viewport_w) // 2
-    rgb_frames: list[Image.Image] = []
-    for frame_index, offset in enumerate(offsets):
-        frame = background.copy()
-        viewport = strip.crop((offset, 0, offset + viewport_w, viewport_h))
-        frame.paste(viewport, (paste_x, _VIEWPORT_Y), viewport)
-        if frame_index >= len(offsets) - _HOLD_STOP_FRAMES:
-            # Track the landing card's true on-screen position rather than
-            # assuming it's centered — the final offset is clamped to the
-            # strip's right edge (the landing card is last, nothing follows
-            # it to fill the right half of the viewport), so a fixed
-            # "center of viewport" box would drift off the actual card.
-            landing_screen_x = paste_x + (landing_center_x - offset) - card_w / 2
-            _draw_highlight(
-                frame,
-                x=int(landing_screen_x) - 6,
-                y=_VIEWPORT_Y - 6,
-                size=(card_w + 12, card_h + _LABEL_HEIGHT + 12),
-                color=landing_card.border_color,
-            )
-        rgb_frames.append(frame)
 
-    return _encode_frames_to_mp4(rgb_frames, durations)
+    def _compose_frames() -> Iterator[Image.Image]:
+        # Composed one at a time and handed straight to the encoder, so only the current frame is in memory.
+        for frame_index, offset in enumerate(offsets):
+            frame = background.copy()
+            viewport = strip.crop((offset, 0, offset + viewport_w, viewport_h))
+            frame.paste(viewport, (paste_x, _VIEWPORT_Y), viewport)
+            if frame_index >= len(offsets) - _HOLD_STOP_FRAMES:
+                # Track the landing card's true on-screen position rather than
+                # assuming it's centered — the final offset is clamped to the
+                # strip's right edge (the landing card is last, nothing follows
+                # it to fill the right half of the viewport), so a fixed
+                # "center of viewport" box would drift off the actual card.
+                landing_screen_x = paste_x + (landing_center_x - offset) - card_w / 2
+                _draw_highlight(
+                    frame,
+                    x=int(landing_screen_x) - 6,
+                    y=_VIEWPORT_Y - 6,
+                    size=(card_w + 12, card_h + _LABEL_HEIGHT + 12),
+                    color=landing_card.border_color,
+                )
+            yield frame
+
+    return _encode_frames_to_mp4(_compose_frames(), durations)

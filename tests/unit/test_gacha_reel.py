@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import tempfile
+import time
 from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
@@ -10,6 +11,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
+from selara.presentation import gacha_reel
 from selara.presentation.gacha_reel import ReelCard, build_gacha_reel_animation
 
 
@@ -101,6 +103,25 @@ def test_build_gacha_reel_animation_returns_mp4_in_target_duration() -> None:
     # well under whatever size threshold makes Telegram clients fall back
     # to file-download rendering instead of inline autoplay.
     assert len(rendered) < 5_000_000
+
+
+@requires_libx264
+def test_encode_stops_composing_and_kills_ffmpeg_when_the_deadline_passes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A render that overruns its deadline must not keep composing frames or
+    keep an ffmpeg child alive behind the caller (incident 2026-10-12)."""
+    monkeypatch.setattr(gacha_reel, "_ENCODE_TIMEOUT_SECONDS", 0.5)
+    composed = []
+
+    def slow_frames():
+        for _ in range(400):
+            time.sleep(0.05)
+            composed.append(1)
+            yield Image.new("RGB", (1280, 720), (10, 20, 30))
+
+    with pytest.raises(gacha_reel.GachaReelEncodeError, match="did not finish"):
+        gacha_reel._encode_frames_to_mp4(slow_frames(), durations=[100] * 400)
+
+    assert len(composed) < 400
 
 
 def test_build_gacha_reel_animation_requires_at_least_one_filler() -> None:
