@@ -157,6 +157,7 @@ from selara.presentation.handlers.stats import (
     should_include_hybrid_top_keyboard,
 )
 from selara.presentation.formatters import format_user_link, preferred_mention_label_from_parts
+from selara.presentation.cpu_executor import run_in_cpu_executor
 from selara.presentation.quote_card import build_quote_card
 from selara.presentation.handlers.settings_common import settings_to_dict
 from selara.presentation.db_recovery import safe_rollback
@@ -4370,7 +4371,8 @@ async def _send_quote_card(message: Message, bot: Bot, settings: Settings) -> No
     avatar_bytes = await _download_telegram_avatar(bot, user_id=author.id)
 
     try:
-        rendered = build_quote_card(
+        rendered = await run_in_cpu_executor(
+            build_quote_card,
             author_name=author_name,
             quote_text=quote_text,
             date_label=_quote_date_label(reply.date, timezone_name=settings.bot_timezone),

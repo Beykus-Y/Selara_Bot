@@ -6,6 +6,7 @@ from io import BytesIO
 import unicodedata
 from typing import Any
 
+from selara.presentation.cpu_executor import run_in_cpu_executor
 from selara.presentation.font_support import resolve_emoji_font_paths, resolve_matplotlib_font_path
 from selara.presentation.renderer_service import PlaywrightRendererService
 
@@ -569,4 +570,5 @@ body {{
     image_bytes = await renderer.render_html(html_template, width=1000, height=800)
     
     # Target @2x is already rendered in renderer. Now downscale to <= 1280px on the longest side
-    return downscale_if_needed(image_bytes, max_side=1280)
+    # Pillow decode, resize and encode are CPU work, so they run off the event loop.
+    return await run_in_cpu_executor(downscale_if_needed, image_bytes, max_side=1280)
