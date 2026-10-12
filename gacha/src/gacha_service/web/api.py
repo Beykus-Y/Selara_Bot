@@ -17,14 +17,13 @@ from gacha_service.application.catalog import (
 )
 from gacha_service.application.service import GachaService
 from gacha_service.config import settings
+from gacha_service.domain.banner_profiles import get_banner_profile
 from gacha_service.domain.models import (
-    RARITY_LABELS,
     RARITY_SUMMARY_ORDER,
     CardRarity,
     PlayerState,
     format_element_label,
     format_rarity_icon,
-    format_rarity_summary_label,
     format_region_label,
     resolve_rank,
 )
@@ -224,7 +223,7 @@ def _resolve_card_codes(*, banner: str, code: str) -> tuple[str | None, str | No
 
 
 def _resolve_card_labels(*, banner: str, region_code: str | None, element_code: str | None) -> tuple[str | None, str | None]:
-    if banner != "genshin":
+    if not get_banner_profile(banner).shows_origin:
         return None, None
     return format_region_label(region_code), format_element_label(element_code)
 
@@ -242,7 +241,7 @@ def _to_history_payload(entry) -> HistoryEntryPayload:
         pulled_at=entry.pulled_at,
         card_name=entry.character_name,
         rarity=rarity.value,
-        rarity_label=RARITY_LABELS[rarity],
+        rarity_label=get_banner_profile(entry.banner).rarity_labels[rarity],
         points=entry.points,
         primogems=entry.primogems,
         adventure_xp_gained=entry.adventure_xp,
@@ -263,6 +262,7 @@ def _resolve_public_image_url(request: Request, image_url: str) -> str:
 
 def _build_rarity_counts(*, banner: str, collection_entries) -> list[RarityCountPayload]:
     rarity_by_code = {card.code: card.rarity for card in get_banner_config(banner).cards}
+    profile = get_banner_profile(banner)
     counts = {rarity: 0 for rarity in RARITY_SUMMARY_ORDER}
     for entry in collection_entries:
         character_code = getattr(entry, "character_code", None)
@@ -277,8 +277,8 @@ def _build_rarity_counts(*, banner: str, collection_entries) -> list[RarityCount
     return [
         RarityCountPayload(
             rarity=rarity.value,
-            rarity_label=RARITY_LABELS[rarity],
-            summary_label=format_rarity_summary_label(rarity),
+            rarity_label=profile.rarity_labels[rarity],
+            summary_label=profile.rarity_summary_labels[rarity],
             count=counts[rarity],
         )
         for rarity in RARITY_SUMMARY_ORDER
@@ -299,7 +299,7 @@ def _pull_response_from_result(*, result, request: Request, fallback_banner: str
             code=result.card.code,
             name=result.card.name,
             rarity=result.card.rarity.value,
-            rarity_label=RARITY_LABELS[result.card.rarity],
+            rarity_label=get_banner_profile(card_banner).rarity_labels[result.card.rarity],
             points=result.card.points,
             primogems=result.card.primogems,
             image_url=_resolve_public_image_url(request, result.card.image_url),
@@ -343,23 +343,15 @@ def _format_profile_timestamp(value: datetime) -> str:
 
 
 def _profile_banner_heading(banner: str, banner_title: str) -> str:
-    if banner == "genshin":
-        return "💠 Геншин"
-    if banner == "hsr":
-        return "🌌 Honkai: Star Rail"
-    return f"🎴 {banner_title}"
+    return get_banner_profile(banner).profile_heading or f"🎴 {banner_title}"
 
 
 def _profile_rank_label(banner: str) -> str:
-    if banner == "hsr":
-        return "Освоение"
-    return "Ранг"
+    return get_banner_profile(banner).profile_rank_label
 
 
 def _profile_currency_label(banner: str) -> str:
-    if banner == "hsr":
-        return "Нефрит"
-    return "Примогемы"
+    return get_banner_profile(banner).profile_currency_label
 
 
 def _render_profile_collection_summary(rarity_counts: list[RarityCountPayload]) -> str | None:
@@ -593,7 +585,7 @@ def build_router(session_factory):
                     code=card.code,
                     name=card.name,
                     rarity=card.rarity.value,
-                    rarity_label=RARITY_LABELS[card.rarity],
+                    rarity_label=get_banner_profile(banner).rarity_labels[card.rarity],
                     points=card.points,
                     primogems=card.primogems,
                     image_url=_resolve_public_image_url(request, card.image_url),
@@ -641,7 +633,7 @@ def build_router(session_factory):
                         code=card.character_code,
                         name=card_info.name,
                         rarity=card_info.rarity.value,
-                        rarity_label=RARITY_LABELS[card_info.rarity],
+                        rarity_label=get_banner_profile(banner).rarity_labels[card_info.rarity],
                         copies_owned=card.copies_owned,
                         image_url=_resolve_public_image_url(request, card_info.image_url),
                         region_code=card_info.region_code,

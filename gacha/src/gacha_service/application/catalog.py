@@ -50,6 +50,24 @@ class BannerConfig(BaseModel):
         return self
 
 
+PLACEHOLDER_IMAGE_URL = "/images/placeholder.jpg"
+_IMAGES_URL_PREFIX = "/images/"
+
+
+def _resolve_card_image_url(image_url: str) -> str:
+    """Use the shared placeholder while a card's artwork file is not uploaded yet.
+
+    Artwork is expected at /images/<banner>/<code>.jpg, so adding a file is enough to
+    replace the placeholder after the next deploy, which ships the images directory.
+    """
+    if not image_url.startswith(_IMAGES_URL_PREFIX):
+        return image_url
+    relative_path = image_url.removeprefix(_IMAGES_URL_PREFIX)
+    if (settings.images_dir / relative_path).is_file():
+        return image_url
+    return PLACEHOLDER_IMAGE_URL
+
+
 def _load_banner_file(path: Path) -> BannerConfig:
     with path.open("r", encoding="utf-8") as file:
         payload = json.load(file)
@@ -65,6 +83,8 @@ def _load_all_banners() -> dict[str, BannerConfig]:
     banners: dict[str, BannerConfig] = {}
     for path in sorted(config_dir.glob("*.json")):
         config = _load_banner_file(path)
+        for card in config.cards:
+            card.image_url = _resolve_card_image_url(card.image_url)
         banners[config.code] = config
     return banners
 

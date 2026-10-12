@@ -922,3 +922,53 @@ def test_resolve_public_image_url_builds_vps_link() -> None:
     image_url = _resolve_public_image_url(request, "/images/genshin/amber.jpg")
 
     assert image_url == "http://127.0.0.1:8001/images/genshin/amber.jpg"
+
+
+def test_zzz_profile_uses_zzz_terms_and_rarity_labels() -> None:
+    from gacha_service.domain.banner_profiles import get_banner_profile
+
+    profile = get_banner_profile("zzz")
+
+    assert profile.rank_label == "Уровень Интернота"
+    assert profile.xp_label == "Кредиты Интернота"
+    assert profile.currency_label == "Полихромы"
+    assert profile.rarity_labels[CardRarity.legendary] == "🟨 Агент S-ранга"
+    assert profile.rarity_labels[CardRarity.epic] == "🟪 Агент A-ранга"
+    assert profile.shows_origin is False
+    assert profile.duplicate_stage_prefix == "М"
+    assert profile.progression_reward_label == "кинолента"
+
+
+@pytest.mark.asyncio
+async def test_zzz_pull_and_duplicate_use_zzz_wording() -> None:
+    repo = FakeGachaRepository()
+    now = datetime(2026, 10, 12, 12, 0, tzinfo=timezone.utc)
+    card = GachaCard(
+        code="rina",
+        banner="zzz",
+        name="Рина (Александрина)",
+        rarity=CardRarity.legendary,
+        points=11000,
+        primogems=22,
+        adventure_xp=200,
+        image_url="/images/zzz/rina.jpg",
+        weight=1,
+    )
+
+    class FixedRandom:
+        def choices(self, population, weights=None, k=1):
+            return [card]
+
+    service = GachaService(repo, rng=FixedRandom())
+
+    first = await service.pull(user_id=1301, username="agent", banner="zzz", now=now)
+    second = await service.pull(user_id=1301, username="agent", banner="zzz", now=now + timedelta(hours=1, minutes=1))
+
+    assert first.card is not None
+    assert "Редкость: 🟨 Агент S-ранга" in first.message
+    assert "Полихромы" in first.message
+    assert "Уровень Интернота" in first.message
+    assert "Регион" not in first.message
+    assert second.card is not None
+    assert second.card.name == "Рина (Александрина) (М1)"
+    assert "кинолента" in second.message.lower()
