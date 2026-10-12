@@ -56,7 +56,11 @@ function mergeGachaHealth(...components: AdminHealthComponent[]): AdminHealthCom
 }
 
 function HealthRows({ components }: { components: Record<string, AdminHealthComponent> }) {
-  const gacha = mergeGachaHealth(components.gacha_genshin, components.gacha_hsr, components.gacha_zzz)
+  // gacha_zzz is absent while the API still runs the previous release; skip it instead of crashing the dashboard.
+  const gachaComponents = [components.gacha_genshin, components.gacha_hsr, components.gacha_zzz].filter(
+    (item): item is AdminHealthComponent => item !== undefined,
+  )
+  const gacha = mergeGachaHealth(...gachaComponents)
   const rows = [
     { key: 'telegram_bot', title: 'Telegram Bot', component: components.telegram_bot },
     { key: 'web', title: 'Web', component: components.web },

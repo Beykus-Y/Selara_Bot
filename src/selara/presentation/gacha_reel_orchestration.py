@@ -333,28 +333,27 @@ async def cache_reel_variant_after_send(
     )
 
 
-_animation_cache_ready = False
+_ready_animation_banners: set[str] = set()
 
 
-async def is_gacha_animation_cache_ready(settings: Settings, activity_repo) -> bool:
+async def is_gacha_animation_cache_ready(settings: Settings, activity_repo, banner: str | None = None) -> bool:
     """Coarse readiness gate for the 'preparing' message — not a precise
     per-card version check (that already happens for real inside
     `resolve_gacha_reel_animation` on every pull). Just: does every card in
-    every active banner have *some* cached variant at all? Sticky once
-    true: evict-then-add (решение 9) never drops a card back to zero
-    variants, so readiness can only go False → True, never back."""
-    global _animation_cache_ready
-    if _animation_cache_ready:
-        return True
-
-    for banner in _ACTIVE_BANNERS:
-        catalog = await _get_banner_catalog(settings, banner)
-        cached_versions = await activity_repo.get_gacha_animation_cached_versions_by_card(banner=banner)
-        for card in catalog.cards:
-            if card.code not in cached_versions:
-                return False
-
-    _animation_cache_ready = True
+    the given banner (or in every active banner when `banner` is None) have
+    *some* cached variant at all? Readiness is per banner, so a cold banner
+    such as ZZZ never switches animations of already-warm Genshin/HSR off.
+    Sticky per banner once true: evict-then-add (решение 9) never drops a
+    card back to zero variants, so readiness can only go False → True."""
+    banners = _ACTIVE_BANNERS if banner is None else (banner,)
+    for current in banners:
+        if current in _ready_animation_banners:
+            continue
+        catalog = await _get_banner_catalog(settings, current)
+        cached_versions = await activity_repo.get_gacha_animation_cached_versions_by_card(banner=current)
+        if any(card.code not in cached_versions for card in catalog.cards):
+            return False
+        _ready_animation_banners.add(current)
     return True
 
 
