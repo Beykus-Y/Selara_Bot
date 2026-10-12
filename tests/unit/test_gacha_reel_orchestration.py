@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import threading
 import time
 from types import SimpleNamespace
@@ -1008,3 +1009,247 @@ async def test_fetch_bytes_cached_warm_hit_then_revalidates_after_window(monkeyp
     assert third == b"portrait-bytes"
     assert len(client.calls) == 2
     assert client.calls[1] == {"If-None-Match": '"img-etag"'}
+
+
+FROZEN_RENDERER_SHA256 = "aa484f1ced86a093ae243b9d6a00c9189bb38e2ba9d91a19420d437dae24c8b3"
+
+
+def test_frozen_renderer_copy_is_the_file_the_cached_mp4s_were_rendered_with() -> None:
+    """The copy is `git show b4cb08e:src/selara/presentation/gacha_reel.py`, the renderer production ran when it stored the
+    cached MP4s. Its bytes are the cache-version input, so a different copy re-keys every card."""
+    assert hashlib.sha256(orch._VISUAL_RENDERER_SOURCE.read_bytes()).hexdigest() == FROZEN_RENDERER_SHA256
+
+
+def test_cache_version_is_unchanged_for_the_mp4s_already_cached_in_production() -> None:
+    """Pinned from the b4cb08e renderer and background image, so a deploy keeps every stored animation valid. A change
+    here means the whole catalog is re-rendered."""
+    assert orch._compute_cache_version(banner="genshin", landing_card_etag='"etag-a"') == "aa8ba92b270c937b"
+
+
+@pytest.mark.asyncio
+async def test_resolve_without_render_returns_none_when_the_card_has_nothing_cached(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    activity_repo = SimpleNamespace(
+        get_gacha_animation_variant_count=AsyncMock(return_value=0),
+        get_random_gacha_animation_variant_file_id=AsyncMock(),
+    )
+    render_mock = AsyncMock()
+    monkeypatch.setattr(orch, "_render_reel_gif", render_mock)
+
+    result = await orch.resolve_gacha_reel_animation(
+        settings=SimpleNamespace(gacha_reel_cache_dir=str(tmp_path)),
+        activity_repo=activity_repo,
+        banner="genshin",
+        landing_card_code="furina",
+        landing_card_name="Фурина",
+        landing_rarity="mythic",
+        landing_rarity_label="🟥 Мифическая",
+        allow_render=False,
+    )
+
+    assert result is None
+    render_mock.assert_not_awaited()
+    activity_repo.get_random_gacha_animation_variant_file_id.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_resolve_without_render_falls_back_to_cached_file_id_when_no_disk_copy_exists(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    activity_repo = SimpleNamespace(
+        get_gacha_animation_variant_count=AsyncMock(return_value=1),
+        get_random_gacha_animation_variant_file_id=AsyncMock(return_value="cached-file-id"),
+    )
+    render_mock = AsyncMock()
+    monkeypatch.setattr(orch, "_render_reel_gif", render_mock)
+
+    result = await orch.resolve_gacha_reel_animation(
+        settings=SimpleNamespace(gacha_reel_cache_dir=str(tmp_path)),
+        activity_repo=activity_repo,
+        banner="genshin",
+        landing_card_code="furina",
+        landing_card_name="Фурина",
+        landing_rarity="mythic",
+        landing_rarity_label="🟥 Мифическая",
+        allow_render=False,
+    )
+
+    assert result.payload == "cached-file-id"
+    assert result.needs_caching is False
+    render_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ensure_gacha_reel_on_disk_renders_a_missing_copy_without_waiting_for_the_slot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    render_mock = AsyncMock(return_value=_valid_mp4_bytes())
+    monkeypatch.setattr(orch, "_render_reel_gif", render_mock)
+
+    await orch.ensure_gacha_reel_on_disk(
+        settings=SimpleNamespace(gacha_reel_cache_dir=str(tmp_path)),
+        banner="genshin",
+        landing_card_code="furina",
+        landing_card_name="Фурина",
+        landing_rarity="mythic",
+        landing_rarity_label="🟥 Мифическая",
+    )
+
+    render_mock.assert_awaited_once()
+    assert render_mock.await_args.kwargs["wait_for_slot"] is False
+    assert render_mock.await_args.kwargs["cache_version"] == "v1"
+    assert render_mock.await_args.kwargs["landing_border_color"] == (230, 60, 70)
+    assert not orch._reels_being_rendered
+
+
+@pytest.mark.asyncio
+async def test_ensure_gacha_reel_on_disk_skips_a_card_whose_copy_is_already_on_disk(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    settings = SimpleNamespace(gacha_reel_cache_dir=str(tmp_path))
+    orch._write_local_reel_atomic(
+        settings=settings, banner="genshin", card_code="furina", cache_version="v1", content=_valid_mp4_bytes()
+    )
+    render_mock = AsyncMock()
+    monkeypatch.setattr(orch, "_render_reel_gif", render_mock)
+
+    await orch.ensure_gacha_reel_on_disk(
+        settings=settings,
+        banner="genshin",
+        landing_card_code="furina",
+        landing_card_name="Фурина",
+        landing_rarity="mythic",
+        landing_rarity_label="🟥 Мифическая",
+    )
+
+    render_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ensure_gacha_reel_on_disk_leaves_the_card_for_later_when_the_slot_is_busy_and_never_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    settings = SimpleNamespace(gacha_reel_cache_dir=str(tmp_path))
+    kwargs = dict(
+        settings=settings,
+        banner="genshin",
+        landing_card_code="furina",
+        landing_card_name="Фурина",
+        landing_rarity="mythic",
+        landing_rarity_label="🟥 Мифическая",
+    )
+    monkeypatch.setattr(orch, "_render_reel_gif", AsyncMock(side_effect=orch.GachaRenderBusyError("busy")))
+    await orch.ensure_gacha_reel_on_disk(**kwargs)
+    assert not orch._reels_being_rendered
+
+    monkeypatch.setattr(orch, "_render_reel_gif", AsyncMock(side_effect=RuntimeError("pillow exploded")))
+    await orch.ensure_gacha_reel_on_disk(**kwargs)
+    assert not orch._reels_being_rendered
+
+
+@pytest.mark.asyncio
+async def test_slot_wait_gives_up_after_its_budget_while_a_render_holds_the_slot() -> None:
+    assert orch._render_slot.acquire(blocking=False)
+    try:
+        with pytest.raises(orch.GachaRenderBusyError):
+            await orch._acquire_render_slot(wait=True, timeout=0.05)
+    finally:
+        orch._render_slot.release()
+
+
+@pytest.mark.asyncio
+async def test_render_budget_cuts_the_wait_but_the_render_still_lands_on_disk(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.setattr(orch, "_get_banner_catalog", AsyncMock(return_value=_render_test_catalog()))
+    monkeypatch.setattr(orch, "_fetch_bytes_cached", AsyncMock(return_value=b"img-bytes"))
+    mp4 = _valid_mp4_bytes()
+
+    def slow_build(**kwargs):
+        time.sleep(0.3)
+        return mp4
+
+    monkeypatch.setattr(orch, "build_gacha_reel_animation", slow_build)
+    kwargs = _render_kwargs(tmp_path)
+
+    with pytest.raises(TimeoutError):
+        await orch._render_reel_gif(**kwargs, render_timeout=0.05)
+    assert await asyncio.to_thread(orch._render_slot.acquire, True, 5)
+    orch._render_slot.release()
+
+    assert orch._read_local_reel(
+        settings=kwargs["settings"], banner="genshin", card_code="furina", cache_version="v1"
+    ) == mp4
+
+
+def _warm_up_catalog(*card_codes: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        cards=[SimpleNamespace(code=code, name=code.title(), rarity="common", rarity_label="⬜") for code in card_codes]
+    )
+
+
+def _warm_up_repo() -> SimpleNamespace:
+    return SimpleNamespace(
+        get_gacha_animation_cached_versions_by_card=AsyncMock(return_value={}),
+        get_gacha_animation_variant_count=AsyncMock(return_value=0),
+        add_gacha_animation_variant=AsyncMock(),
+        evict_oldest_gacha_animation_variant=AsyncMock(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_warm_up_retries_a_card_that_found_the_render_slot_busy_after_the_rest_of_the_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    catalog = _warm_up_catalog("furina", "amber")
+    monkeypatch.setattr(
+        orch, "_get_banner_catalog", AsyncMock(side_effect=lambda settings, banner: catalog if banner == "genshin" else SimpleNamespace(cards=[]))
+    )
+    activity_repo = _warm_up_repo()
+    resolved = SimpleNamespace(payload=BufferedInputFile(b"mp4", filename="x.mp4"), needs_caching=True, cache_version="v1")
+    calls: list[str] = []
+
+    async def resolve_side_effect(*, landing_card_code, **kwargs):
+        calls.append(landing_card_code)
+        if calls.count("furina") == 1:
+            raise orch.GachaRenderBusyError("busy")
+        return resolved
+
+    resolve_mock = AsyncMock(side_effect=resolve_side_effect)
+    monkeypatch.setattr(orch, "resolve_gacha_reel_animation", resolve_mock)
+    bot = AsyncMock()
+    bot.send_animation = AsyncMock(return_value=SimpleNamespace(message_id=42, animation=SimpleNamespace(file_id="warmup-file-id")))
+    bot.delete_message = AsyncMock()
+
+    await orch.warm_up_gacha_animation_cache(settings=SimpleNamespace(gacha_admin_user_id=905302972), bot=bot, activity_repo=activity_repo)
+
+    # furina was deferred while the slot was busy, amber went first, and furina gets its one retry at the end
+    assert calls == ["furina", "amber", "furina"]
+    assert activity_repo.add_gacha_animation_variant.await_count == 2
+    assert resolve_mock.await_args.kwargs["render_slot_timeout"] == orch._WARMUP_SLOT_WAIT_SECONDS
+    assert resolve_mock.await_args.kwargs["render_timeout"] == orch._WARMUP_RENDER_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_warm_up_defers_a_card_whose_upload_runs_out_of_time_and_sends_it_again_later(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(orch, "_WARMUP_UPLOAD_SECONDS", 0.05)
+    monkeypatch.setattr(orch, "_get_banner_catalog", AsyncMock(side_effect=lambda settings, banner: _warm_up_catalog("amber") if banner == "genshin" else SimpleNamespace(cards=[])))
+    activity_repo = _warm_up_repo()
+    resolved = SimpleNamespace(payload=BufferedInputFile(b"mp4", filename="x.mp4"), needs_caching=True, cache_version="v1")
+    monkeypatch.setattr(orch, "resolve_gacha_reel_animation", AsyncMock(return_value=resolved))
+    attempts: list[dict] = []
+    sent_message = SimpleNamespace(message_id=42, animation=SimpleNamespace(file_id="warmup-file-id"))
+
+    async def send_animation(**kwargs):
+        attempts.append(kwargs)
+        if len(attempts) == 1:
+            await asyncio.sleep(10)  # cut off by the upload budget
+        return sent_message
+
+    bot = AsyncMock()
+    bot.send_animation = AsyncMock(side_effect=send_animation)
+    bot.delete_message = AsyncMock()
+
+    await orch.warm_up_gacha_animation_cache(settings=SimpleNamespace(gacha_admin_user_id=905302972), bot=bot, activity_repo=activity_repo)
+
+    assert len(attempts) == 2
+    activity_repo.add_gacha_animation_variant.assert_awaited_once_with(
+        banner="genshin", card_code="amber", telegram_file_id="warmup-file-id", cache_version="v1"
+    )

@@ -53,7 +53,8 @@ members = ["gacha"]
 
 [tool.setuptools.package-data]
 "selara" = ["images/*.png", "images/**/*.png"]
-"selara.presentation" = ["*.json"]
+# The frozen renderer copy is hashed into the cached reel version (gacha_reel_orchestration._VISUAL_RENDERER_SOURCE).
+"selara.presentation" = ["*.json", "gacha_reel_visual_v1.py.txt"]
 "selara.web" = ["templates/*.html", "static/*.css", "static/*.js"]
 "selara.infrastructure.llm" = ["prompts/*.md", "prompts/daily_summary/*.md", "skills/*/SKILL.md"]
 
