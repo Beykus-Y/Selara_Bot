@@ -2,6 +2,7 @@ from aiogram import Router
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from selara.infrastructure.db.activity_batcher import ActivityBatcher
+from selara.infrastructure.db.session import DatabaseAdmission
 from selara.infrastructure.llm import LlmClient
 from selara.infrastructure.stt import SttClient
 from selara.presentation.handlers.ai_pets import router as ai_pets_router
@@ -53,12 +54,13 @@ def build_router(
     activity_batcher: ActivityBatcher,
     stt_client: SttClient | None = None,
     llm_client: LlmClient | None = None,
+    db_admission: DatabaseAdmission | None = None,
 ) -> Router:
     root = Router(name="root")
     application = Router(name="application")
 
     application.message.outer_middleware(ErrorHandlerMiddleware(session_factory))
-    application.message.outer_middleware(DBSessionMiddleware(session_factory))
+    application.message.outer_middleware(DBSessionMiddleware(session_factory, admission=db_admission))
     application.message.outer_middleware(ChatMigrationMiddleware())
     application.message.outer_middleware(BotBanMiddleware())
     application.message.outer_middleware(ChatSettingsMiddleware())
@@ -68,30 +70,30 @@ def build_router(
     application.message.outer_middleware(ActivityTrackerMiddleware(activity_batcher))
 
     application.edited_message.outer_middleware(ErrorHandlerMiddleware(session_factory))
-    application.edited_message.outer_middleware(DBSessionMiddleware(session_factory))
+    application.edited_message.outer_middleware(DBSessionMiddleware(session_factory, admission=db_admission))
     application.edited_message.outer_middleware(ChatSettingsMiddleware())
     application.edited_message.outer_middleware(ActivityTrackerMiddleware(activity_batcher))
 
     application.callback_query.outer_middleware(ErrorHandlerMiddleware(session_factory))
-    application.callback_query.outer_middleware(DBSessionMiddleware(session_factory))
+    application.callback_query.outer_middleware(DBSessionMiddleware(session_factory, admission=db_admission))
     application.callback_query.outer_middleware(BotBanMiddleware())
     application.callback_query.outer_middleware(ChatSettingsMiddleware())
     application.callback_query.outer_middleware(ChatWriteLockMiddleware())
 
     application.message_reaction.outer_middleware(ErrorHandlerMiddleware(session_factory))
-    application.message_reaction.outer_middleware(DBSessionMiddleware(session_factory))
+    application.message_reaction.outer_middleware(DBSessionMiddleware(session_factory, admission=db_admission))
 
     application.message_reaction_count.outer_middleware(ErrorHandlerMiddleware(session_factory))
-    application.message_reaction_count.outer_middleware(DBSessionMiddleware(session_factory))
+    application.message_reaction_count.outer_middleware(DBSessionMiddleware(session_factory, admission=db_admission))
 
     application.inline_query.outer_middleware(ErrorHandlerMiddleware(session_factory))
-    application.inline_query.outer_middleware(DBSessionMiddleware(session_factory))
+    application.inline_query.outer_middleware(DBSessionMiddleware(session_factory, admission=db_admission))
 
     application.chosen_inline_result.outer_middleware(ErrorHandlerMiddleware(session_factory))
-    application.chosen_inline_result.outer_middleware(DBSessionMiddleware(session_factory))
+    application.chosen_inline_result.outer_middleware(DBSessionMiddleware(session_factory, admission=db_admission))
 
     application.chat_member.outer_middleware(ErrorHandlerMiddleware(session_factory))
-    application.chat_member.outer_middleware(DBSessionMiddleware(session_factory))
+    application.chat_member.outer_middleware(DBSessionMiddleware(session_factory, admission=db_admission))
 
     # Payment updates bypass general catch-all handlers and their middleware.
     # Their handlers create their own DB sessions and keep polling blocked until

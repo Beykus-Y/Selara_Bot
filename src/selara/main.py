@@ -24,7 +24,7 @@ from selara.infrastructure.db.chat_member_snapshots import run_chat_member_count
 from selara.infrastructure.db.market_expiry_sweeper import run_market_expiry_scheduler
 from selara.infrastructure.db.message_archive_retention import run_message_archive_retention_scheduler
 from selara.infrastructure.db.repositories import SqlAlchemyActivityRepository
-from selara.infrastructure.db.session import create_engine, create_session_factory
+from selara.infrastructure.db.session import DatabaseAdmission, create_engine, create_session_factory
 from selara.infrastructure.http.web_search import build_web_search_client
 from selara.infrastructure.llm import LlmClient
 from selara.infrastructure.llm.runtime import llm_runtime_problem
@@ -208,7 +208,15 @@ async def _run_bot(settings, session_factory) -> None:
     logger.info("Web search client: %s",
                 f"OK ({web_search_client.provider_name})" if web_search_client is not None else "None (disabled)")
     dispatcher = PaymentSafeDispatcher()
-    dispatcher.include_router(build_router(session_factory, activity_batcher=activity_batcher, stt_client=stt_client, llm_client=llm_client))
+    dispatcher.include_router(
+        build_router(
+            session_factory,
+            activity_batcher=activity_batcher,
+            stt_client=stt_client,
+            llm_client=llm_client,
+            db_admission=DatabaseAdmission.from_settings(settings),
+        )
+    )
 
     await run_startup_relationship_cleanup(bot=bot, settings=settings, session_factory=session_factory)
     await sync_bot_commands(bot, summary_enabled=llm_client is not None)
