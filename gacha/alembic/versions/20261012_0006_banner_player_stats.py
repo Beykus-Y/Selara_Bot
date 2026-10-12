@@ -33,8 +33,7 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("user_id", "banner"),
     )
     op.execute(_BACKFILL_SQL)
-    op.alter_column("gacha_player_banner_stats", "total_points", server_default=None)
-    op.alter_column("gacha_player_banner_stats", "adventure_xp", server_default=None)
+    # The column server defaults stay: removing them would need ALTER COLUMN, which SQLite rejects.
 
 
 def downgrade() -> None:
