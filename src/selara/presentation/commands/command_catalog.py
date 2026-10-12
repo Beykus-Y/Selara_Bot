@@ -387,19 +387,22 @@ COMMAND_CATALOG: tuple[CommandSpec, ...] = (
         category="misc",
         dispatch_kind="natural_language",
         syntax=(),
-        title_ru="Гача (Genshin / HSR)",
+        title_ru="Гача (Genshin / HSR / ZZZ)",
         description_ru=(
-            "Мини-игра с двумя баннерами — Genshin Impact («генш»/«геншин») и Honkai: Star "
-            "Rail («хср»). Работает через внешний gacha-сервис бота, а не через обычную "
-            "экономику напрямую."
+            "Мини-игра с тремя баннерами — Genshin Impact («генш»/«геншин»), Honkai: Star "
+            "Rail («хср») и Zenless Zone Zero («ззз»/«зенлес»). Работает через внешний "
+            "gacha-сервис бота, а не через обычную экономику напрямую."
         ),
         natural_triggers=(
             "гача генш",
             "гача геншин",
             "гача хср",
+            "гача ззз",
+            "гача зенлес",
             "моя гача генш",
             "моя гача геншин",
             "моя гача хср",
+            "моя гача ззз",
             "гача инфо",
             "гача скип генш",
         ),

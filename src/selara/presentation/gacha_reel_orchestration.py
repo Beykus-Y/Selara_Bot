@@ -13,6 +13,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import BufferedInputFile
 
+from selara.application.gacha_banners import GACHA_BANNER_CODES
 from selara.application.use_cases.gacha import GachaUseCaseError, get_banner_cards
 from selara.core.config import Settings
 from selara.presentation import gacha_reel
@@ -20,7 +21,7 @@ from selara.presentation.gacha_reel import ReelCard, build_gacha_reel_animation
 
 logger = logging.getLogger(__name__)
 
-_ACTIVE_BANNERS = ("genshin", "hsr")
+_ACTIVE_BANNERS = GACHA_BANNER_CODES
 _VARIANT_CAP = 3
 _REGENERATE_PROBABILITY = 0.15
 _FILLER_COUNT = 10

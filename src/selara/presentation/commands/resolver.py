@@ -1,4 +1,5 @@
 from selara.application.dto import CommandIntent
+from selara.application.gacha_banners import gacha_banner_aliases
 from selara.presentation.commands.aliases import EXACT_ALIASES
 from selara.presentation.commands.catalog import PREFIX_TRIGGER_TO_COMMAND_KEY, prefix_tail_is_valid
 from selara.presentation.commands.normalizer import normalize_text_command
@@ -8,11 +9,8 @@ class TextCommandResolutionError(ValueError):
     pass
 
 
-_GACHA_BANNER_ALIASES = {
-    "генш": "genshin",
-    "геншин": "genshin",
-    "хср": "hsr",
-}
+_GACHA_BANNER_ALIASES = gacha_banner_aliases()
+_GACHA_BANNER_CHOICES = "|".join(_GACHA_BANNER_ALIASES)
 
 
 def _parse_limit(raw: str, *, top_max: int) -> int:
@@ -118,8 +116,8 @@ def _parse_duration_seconds(token: str) -> int | None:
 
 
 def _parse_gacha_command(tokens: list[str]) -> CommandIntent | None:
-    usage = "Формат: гача генш|геншин|хср, моя гача генш|геншин|хср или гача инфо"
-    skip_usage = "Формат: гача скип генш|геншин|хср [@username]"
+    usage = f"Формат: гача {_GACHA_BANNER_CHOICES}, моя гача {_GACHA_BANNER_CHOICES} или гача инфо"
+    skip_usage = f"Формат: гача скип {_GACHA_BANNER_CHOICES} [@username]"
     toggle_usage = "Формат: гача вкл/выкл [5м|2ч|1д]"
 
     if len(tokens) >= 2 and tokens[0] == "гача" and tokens[1] == "админ":

@@ -83,6 +83,11 @@ gacha/images/hsr/kafka.jpg
 http://your-vps:8001/images/genshin/amber.jpg
 ```
 
+Если файла карты нет, сервис отдаёт общую заглушку `/images/placeholder.jpg`
+(`gacha/images/placeholder.jpg`). Баннер `zzz` использует пути `gacha/images/zzz/<code>.jpg`,
+где `<code>` совпадает с полем `code` карты в `zzz.json`; положите файлы туда, и после
+пересборки образа заглушка заменится настоящими картинками.
+
 ## Формат banner JSON
 
 Баннеры лежат в `gacha/config/banners/*.json`.

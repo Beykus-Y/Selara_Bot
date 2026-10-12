@@ -7,10 +7,19 @@ import { getUserCollection, getUserProfile } from '@/shared/api/gachaClient'
 import { usePageTitle } from '@/shared/lib/use-page-title'
 import { LoadingShell } from '@/shared/ui/LoadingShell'
 
+type GachaBanner = 'genshin' | 'hsr' | 'zzz'
+
+const BANNER_TABS: { code: GachaBanner; tab: string; command: string }[] = [
+  { code: 'genshin', tab: 'Genshin', command: 'генш' },
+  { code: 'hsr', tab: 'HSR', command: 'хср' },
+  { code: 'zzz', tab: 'ZZZ', command: 'ззз' },
+]
+
 export function GachaCollectionPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const rawBanner = searchParams.get('banner')
-  const banner = rawBanner === 'hsr' ? 'hsr' : 'genshin'
+  const banner: GachaBanner = BANNER_TABS.some((item) => item.code === rawBanner) ? (rawBanner as GachaBanner) : 'genshin'
+  const bannerCommand = BANNER_TABS.find((item) => item.code === banner)?.command ?? 'генш'
 
   usePageTitle('Гача')
 
@@ -49,16 +58,9 @@ export function GachaCollectionPage() {
     epic: 'oklch(0.7 0.16 320)',
     rare: 'oklch(0.76 0.12 250)',
   }
-  const rarityLabel: Record<string, string> = {
-    mythic: 'Мифическая',
-    legendary: 'Легендарная',
-    epic: 'Эпическая',
-    rare: 'Редкая',
-    common: 'Обычная',
-  }
-  const switchBanner = (next: 'genshin' | 'hsr') => {
+  const switchBanner = (next: GachaBanner) => {
     const nextParams = new URLSearchParams(searchParams)
-    if (next === 'hsr') nextParams.set('banner', 'hsr')
+    if (next !== 'genshin') nextParams.set('banner', next)
     else nextParams.delete('banner')
     setSearchParams(nextParams, { replace: true })
   }
@@ -69,8 +71,18 @@ export function GachaCollectionPage() {
       <p className="v2-sub">Карточки и история круток по баннеру.</p>
 
       <div className="v2-tabs" role="tablist" aria-label="Выбор баннера">
-        <button type="button" role="tab" aria-selected={banner === 'genshin'} className={banner === 'genshin' ? 'on' : ''} onClick={() => switchBanner('genshin')}>Genshin</button>
-        <button type="button" role="tab" aria-selected={banner === 'hsr'} className={banner === 'hsr' ? 'on' : ''} onClick={() => switchBanner('hsr')}>HSR</button>
+        {BANNER_TABS.map((item) => (
+          <button
+            key={item.code}
+            type="button"
+            role="tab"
+            aria-selected={banner === item.code}
+            className={banner === item.code ? 'on' : ''}
+            onClick={() => switchBanner(item.code)}
+          >
+            {item.tab}
+          </button>
+        ))}
       </div>
 
       <div style={{ marginTop: 20, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
@@ -88,7 +100,7 @@ export function GachaCollectionPage() {
       </div>
       {showInviteText && (
         <p style={{ fontSize: 13, color: '#c9c4da', margin: '12px 0 0', lineHeight: 1.5 }}>
-          Напишите боту в личку: <b style={{ color: 'var(--text)' }}>гача {banner === 'hsr' ? 'хср' : 'генш'}</b>
+          Напишите боту в личку: <b style={{ color: 'var(--text)' }}>гача {bannerCommand}</b>
         </p>
       )}
 
@@ -102,7 +114,7 @@ export function GachaCollectionPage() {
               <span className="v2-main">
                 <b style={{ fontSize: 14 }}>{pull.card_name}</b>
                 <span style={{ color: pull.rarity === 'common' ? undefined : color, marginTop: 4 }}>
-                  {rarityLabel[pull.rarity] ?? pull.rarity}
+                  {pull.rarity_label}
                 </span>
               </span>
               <span style={{ textAlign: 'right', flex: 'none' }}>
