@@ -58,11 +58,16 @@ async function postData<T>(path: string, payload: Record<string, unknown>, fallb
     const { data } = await http.post<T>(path, body, body instanceof FormData ? { headers: { 'Content-Type': 'multipart/form-data' } } : undefined)
     return data
   } catch (error) {
-    const responseMessage = typeof error === 'object' && error !== null && 'response' in error
-      ? (error as { response?: { data?: { message?: string; detail?: string } } }).response?.data
+    const response = typeof error === 'object' && error !== null && 'response' in error
+      ? (error as { response?: { status?: number; data?: { message?: string; detail?: string } } }).response
       : undefined
-    const message = responseMessage?.message ?? responseMessage?.detail
-    throw new Error(typeof message === 'string' ? message : fallback, { cause: error })
+    const message = response?.data?.message ?? response?.data?.detail
+    if (typeof message === 'string') throw new Error(message, { cause: error })
+    // A proxy rejects oversized bodies with an HTML 413 before the app can answer with JSON.
+    if (response?.status === 413) {
+      throw new Error('Фото превышает допустимый размер на сервере (до 10 МБ). Рассылка не создана.', { cause: error })
+    }
+    throw new Error(fallback, { cause: error })
   }
 }
 

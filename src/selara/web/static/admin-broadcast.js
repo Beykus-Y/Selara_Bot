@@ -1,3 +1,13 @@
+function nonJsonSendErrorMessage(status) {
+  if (status === 413) {
+    return "Фото превышает допустимый размер на сервере (до 10 МБ). Рассылка не создана.";
+  }
+  if (status >= 500) {
+    return "Сервер не смог обработать рассылку. Проверьте список рассылок перед повторной отправкой.";
+  }
+  return "Не удалось отправить рассылку.";
+}
+
 const initBroadcastComposer = () => {
   const form = document.querySelector("[data-broadcast-form]");
   if (!form || form.dataset.broadcastReady === "true") return;
@@ -475,7 +485,14 @@ const initBroadcastComposer = () => {
           window.location.href = data.redirect;
           return;
         }
-        showFormError((data && data.message) || "Не удалось отправить рассылку.", data ? data.field : undefined);
+        if (!data) {
+          // Not JSON: the request was rejected by a proxy (e.g. 413) or the server failed before the app answered.
+          const field = response.status === 413 && photoModeEnabled() ? "media" : undefined;
+          showFormError(nonJsonSendErrorMessage(response.status), field);
+          resetSubmitButton();
+          return;
+        }
+        showFormError(data.message || "Не удалось отправить рассылку.", data.field);
         resetSubmitButton();
       })
       .catch(() => {

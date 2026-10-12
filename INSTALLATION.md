@@ -457,6 +457,37 @@ server {
 - В `.env` установлен верный `WEB_BASE_URL`.
 - `WEB_SESSION_COOKIE_SECURE=true` в production.
 
+### 7.3 Рассылка с фотографией
+По умолчанию nginx ограничивает тело запроса 1 МБ и отвечает `413` до приложения. Фото рассылки
+может быть до 10 МБ, поэтому маршруты отправки рассылки с фото нужен отдельный лимит (не глобальный):
+
+```nginx
+location = /app/admin/broadcasts/send {
+    client_max_body_size 12m;
+    proxy_pass http://127.0.0.1:8080;
+    proxy_http_version 1.1;
+
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+
+location = /api/admin/broadcasts/send {
+    client_max_body_size 12m;
+    proxy_pass http://127.0.0.1:8080;
+    proxy_http_version 1.1;
+
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+Блоки должны стоять до общего `location /`. Mini App admin проксируется контейнером фронтенда и
+уже получает нужный лимит из его конфигурации.
+
 ---
 
 ## 8. Эксплуатационные рекомендации
