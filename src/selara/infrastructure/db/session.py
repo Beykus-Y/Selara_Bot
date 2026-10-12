@@ -83,9 +83,13 @@ class DatabaseAdmission:
 
     @classmethod
     def from_settings(cls, settings: Settings) -> DatabaseAdmission:
-        capacity = settings.db_pool_size + settings.db_max_overflow
-        # One pooled connection always stays free for background jobs, the web panel and nested sessions.
-        limit = min(settings.db_max_concurrent_updates, max(1, capacity - 1))
+        limit = settings.db_max_concurrent_updates
+        # QueuePool has no overflow limit when pool_size is 0 or max_overflow is -1,
+        # so only the configured limit applies there.
+        if settings.db_pool_size > 0 and settings.db_max_overflow >= 0:
+            capacity = settings.db_pool_size + settings.db_max_overflow
+            # One pooled connection always stays free for background jobs, the web panel and nested sessions.
+            limit = min(limit, max(1, capacity - 1))
         return cls(max_concurrent=limit, wait_timeout_seconds=settings.db_pool_timeout_seconds)
 
     @property
@@ -123,16 +127,23 @@ def classify_database_failure(exc: BaseException) -> DatabaseFailure | None:
         return DatabaseFailure(DB_ADMISSION_TIMEOUT, "admission")
     if isinstance(exc, PoolTimeoutError):
         return DatabaseFailure(DB_POOL_TIMEOUT, "pool_checkout")
-    if isinstance(exc, DBAPIError) and (
-        exc.connection_invalidated or isinstance(exc, (OperationalError, InterfaceError))
-    ):
-        return DatabaseFailure(DB_UNAVAILABLE, "query")
-    if isinstance(exc, (TimeoutError, ConnectionError)):
-        frames = traceback.extract_tb(exc.__traceback__)
-        if any(marker in frame.filename for frame in frames for marker in _DRIVER_PATH_MARKERS):
-            if any(frame.name in _CONNECT_FRAME_NAMES for frame in frames):
-                category = DB_CONNECT_TIMEOUT if isinstance(exc, TimeoutError) else DB_UNAVAILABLE
-                return DatabaseFailure(category, "connect")
+    if isinstance(exc, (DBAPIError, OSError)):
+        # Only driver frames count, so a handler named connect() does not turn a query error into a connect failure.
+        driver_frames = [
+            frame
+            for frame in traceback.extract_tb(exc.__traceback__)
+            if any(marker in frame.filename for marker in _DRIVER_PATH_MARKERS)
+        ]
+        if any(frame.name in _CONNECT_FRAME_NAMES for frame in driver_frames):
+            # Any failure to open a connection counts: a timeout, a refusal that SQLAlchemy wraps as a generic
+            # DBAPIError (too many connections), or a DNS error, which arrives as a plain OSError.
+            category = DB_CONNECT_TIMEOUT if isinstance(exc, TimeoutError) else DB_UNAVAILABLE
+            return DatabaseFailure(category, "connect")
+        if isinstance(exc, DBAPIError):
+            if exc.connection_invalidated or isinstance(exc, (OperationalError, InterfaceError)):
+                return DatabaseFailure(DB_UNAVAILABLE, "query")
+            return None  # a statement or data error: the database answered
+        if driver_frames:
             return DatabaseFailure(DB_UNAVAILABLE, "query")
     return None
 

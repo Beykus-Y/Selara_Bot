@@ -1,9 +1,12 @@
 import asyncio
+import socket
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy.exc import OperationalError
+from aiogram.exceptions import TelegramMigrateToChat
+from aiogram.methods import SendMessage
+from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 
 from selara.core.config import Settings
@@ -18,8 +21,12 @@ from selara.infrastructure.db.session import (
     create_engine,
 )
 from selara.presentation.middlewares import error_handler as error_module
-from selara.presentation.middlewares.error_alert_config import configure_error_alerts
-from selara.presentation.middlewares.error_handler import ErrorHandlerMiddleware
+from selara.presentation.middlewares.error_alert_config import configure_error_alerts, get_error_alert_config
+from selara.presentation.middlewares.error_handler import ErrorHandlerMiddleware, notify_operational_error
+
+ASYNCPG_CONNECTION = "/venv/lib/python3.13/site-packages/asyncpg/connection.py"
+ASYNCPG_PROTOCOL = "/venv/lib/python3.13/site-packages/asyncpg/protocol/protocol.pyx"
+SQLALCHEMY_DEFAULT = "/venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py"
 
 
 def _settings(**overrides) -> Settings:
@@ -44,10 +51,27 @@ def _capture_engine_arguments(monkeypatch: pytest.MonkeyPatch) -> dict:
     return captured
 
 
+def _raised_from(filename: str, function_name: str, error: BaseException) -> BaseException:
+    """Raise an error from code compiled under a driver file name, so its traceback looks like the driver's."""
+    namespace: dict[str, object] = {"error": error}
+    exec(compile(f"def {function_name}():\n    raise error\n", filename, "exec"), namespace)
+    try:
+        namespace[function_name]()  # type: ignore[operator]
+    except BaseException as exc:
+        return exc
+    raise AssertionError("the helper function did not raise")
+
+
 def test_postgres_engine_bounds_connect_command_and_pool_waits(monkeypatch: pytest.MonkeyPatch) -> None:
     captured = _capture_engine_arguments(monkeypatch)
 
-    create_engine(_settings(DB_CONNECT_TIMEOUT_SECONDS="7", DB_COMMAND_TIMEOUT_SECONDS="90", DB_POOL_TIMEOUT_SECONDS="12"))
+    settings = _settings(
+        DB_CONNECT_TIMEOUT_SECONDS="7",
+        DB_COMMAND_TIMEOUT_SECONDS="90",
+        DB_POOL_TIMEOUT_SECONDS="12",
+    )
+
+    create_engine(settings)
 
     assert captured["pool_size"] == 10
     assert captured["max_overflow"] == 20
@@ -79,6 +103,15 @@ def test_admission_always_leaves_one_pooled_connection_free() -> None:
     assert admission.max_concurrent == 29
 
 
+def test_admission_follows_only_the_setting_when_the_pool_has_no_limit() -> None:
+    # SQLAlchemy's QueuePool is unbounded when max_overflow is -1 or pool_size is 0.
+    unbounded_overflow = _settings(DB_MAX_OVERFLOW="-1", DB_MAX_CONCURRENT_UPDATES="50")
+    unbounded_pool = _settings(DB_POOL_SIZE="0", DB_MAX_CONCURRENT_UPDATES="50")
+
+    assert DatabaseAdmission.from_settings(unbounded_overflow).max_concurrent == 50
+    assert DatabaseAdmission.from_settings(unbounded_pool).max_concurrent == 50
+
+
 def test_pool_timeout_is_reported_at_pool_checkout() -> None:
     failure = classify_database_failure(PoolTimeoutError("QueuePool limit of size 10 overflow 20 reached"))
 
@@ -92,28 +125,48 @@ def test_lost_database_connection_is_reported_as_unavailable_at_query() -> None:
     assert classify_database_failure(error) == DatabaseFailure(DB_UNAVAILABLE, "query")
 
 
-def _raised_from(filename: str, function_name: str, error_type: type[BaseException]) -> BaseException:
-    """Raises from a function compiled under a driver's file name, so the traceback looks like the driver's."""
-    namespace: dict[str, object] = {}
-    source = f"def {function_name}():\n    raise {error_type.__name__}('driver failure')\n"
-    exec(compile(source, filename, "exec"), namespace)
-    try:
-        namespace[function_name]()  # type: ignore[operator]
-    except BaseException as exc:
-        return exc
-    raise AssertionError("the helper function did not raise")
-
-
 def test_connect_timeout_inside_the_driver_is_reported_at_connect() -> None:
-    error = _raised_from("/venv/lib/python3.13/site-packages/asyncpg/connection.py", "connect", TimeoutError)
+    error = _raised_from(ASYNCPG_CONNECTION, "connect", TimeoutError("connect timed out"))
 
     assert classify_database_failure(error) == DatabaseFailure(DB_CONNECT_TIMEOUT, "connect")
 
 
+def test_refused_connection_is_reported_at_connect_even_when_sqlalchemy_wraps_it_generically() -> None:
+    # The server refuses new connections (too many clients). SQLAlchemy wraps that as a plain DBAPIError.
+    refused = DBAPIError("connect", {}, Exception("sorry, too many clients already"))
+    error = _raised_from(ASYNCPG_CONNECTION, "connect", refused)
+
+    assert classify_database_failure(error) == DatabaseFailure(DB_UNAVAILABLE, "connect")
+
+
+def test_dns_failure_during_connect_is_reported_at_connect() -> None:
+    error = _raised_from(ASYNCPG_CONNECTION, "connect", socket.gaierror(-2, "Name or service not known"))
+
+    assert classify_database_failure(error) == DatabaseFailure(DB_UNAVAILABLE, "connect")
+
+
 def test_query_timeout_inside_the_driver_is_reported_as_unavailable() -> None:
-    error = _raised_from("/venv/lib/python3.13/site-packages/asyncpg/protocol/protocol.pyx", "execute", TimeoutError)
+    error = _raised_from(ASYNCPG_PROTOCOL, "execute", TimeoutError("command timed out"))
 
     assert classify_database_failure(error) == DatabaseFailure(DB_UNAVAILABLE, "query")
+
+
+def test_statement_error_during_query_is_not_reported_as_an_outage() -> None:
+    integrity = IntegrityError("INSERT INTO t VALUES (1)", {}, Exception("duplicate key value"))
+    error = _raised_from(SQLALCHEMY_DEFAULT, "execute", integrity)
+
+    assert classify_database_failure(error) is None
+
+
+def test_query_error_inside_a_handler_named_connect_is_not_a_connect_failure() -> None:
+    def connect() -> None:
+        # The app's own connect() is not driver code, so it must not change the stage.
+        raise _raised_from(SQLALCHEMY_DEFAULT, "execute", OperationalError("SELECT 1", {}, Exception("server closed")))
+
+    with pytest.raises(OperationalError) as caught:
+        connect()
+
+    assert classify_database_failure(caught.value) == DatabaseFailure(DB_UNAVAILABLE, "query")
 
 
 def test_errors_outside_the_database_layer_are_not_classified() -> None:
@@ -149,3 +202,35 @@ async def test_pool_exhaustion_alert_reaches_telegram_without_opening_a_pooled_s
     bot.send_message.assert_awaited_once()
     alert = bot.send_message.await_args.kwargs["text"]
     assert "Категория БД: db_pool_timeout (стадия: pool_checkout)" in alert
+
+
+@pytest.mark.asyncio
+async def test_database_failure_alert_retries_at_the_migrated_chat_without_a_session() -> None:
+    error_module._recent_alerts.clear()
+    old_chat_id, new_chat_id = -123, -100123
+    configure_error_alerts(True, old_chat_id)
+    migration = TelegramMigrateToChat(
+        method=SendMessage(chat_id=old_chat_id, text="alert"),
+        message="group migrated",
+        migrate_to_chat_id=new_chat_id,
+    )
+    opened_sessions: list[object] = []
+
+    def refuse_session():
+        opened_sessions.append(object())
+        raise AssertionError("a database failure must not open a session to persist the migrated chat id")
+
+    bot = SimpleNamespace(send_message=AsyncMock(side_effect=[migration, None]))
+    event = SimpleNamespace(bot=bot, chat=SimpleNamespace(id=-1001), from_user=None, text=None)
+
+    await notify_operational_error(
+        session_factory=refuse_session,
+        event=event,
+        exc=PoolTimeoutError("QueuePool limit of size 10 overflow 20 reached"),
+        database_failure=DatabaseFailure(DB_POOL_TIMEOUT, "pool_checkout"),
+    )
+
+    assert opened_sessions == []
+    sent_chat_ids = [call.kwargs["chat_id"] for call in bot.send_message.await_args_list]
+    assert sent_chat_ids == [old_chat_id, new_chat_id]
+    assert get_error_alert_config().chat_id == new_chat_id

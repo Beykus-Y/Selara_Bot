@@ -141,7 +141,9 @@ async def notify_operational_error(
                 if new_chat_id is None:
                     raise
                 configure_error_alerts(settings.enabled, int(new_chat_id))
-                if session_factory is not None:
+                # Same rule as the write above: during a database failure, retry Telegram at once and leave the
+                # persisted chat id for the next migration. The in-memory destination is already updated.
+                if session_factory is not None and database_failure is None:
                     try:
                         async with session_factory() as session:
                             runtime_settings = await session.get(AdminRuntimeSettingsModel, 1)
