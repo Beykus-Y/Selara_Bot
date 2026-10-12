@@ -485,8 +485,25 @@ location = /api/admin/broadcasts/send {
 }
 ```
 
-Блоки должны стоять до общего `location /`. Mini App admin проксируется контейнером фронтенда и
-уже получает нужный лимит из его конфигурации.
+Блоки должны стоять до общего `location /`.
+
+Mini App admin тоже проходит через хостовый nginx перед контейнером фронтенда. Если хост
+проксирует `/miniapp/` в фронтенд-контейнер, добавьте такие же точные блоки для двух путей
+Mini App, с тем же `proxy_pass`, что и у блока `/miniapp/` на хосте. Лимит внутри контейнера
+фронтенда (`frontend/nginx/default.conf.template`) сам по себе не покрывает запрос, который
+уже отклонён хостом:
+
+```nginx
+location = /miniapp/api/miniapp/admin/broadcast {
+    client_max_body_size 12m;
+    # proxy_pass и остальные директивы — как у блока /miniapp/ на этом хосте
+}
+
+location = /miniapp/api/miniapp/admin/broadcast/preview {
+    client_max_body_size 12m;
+    # proxy_pass и остальные директивы — как у блока /miniapp/ на этом хосте
+}
+```
 
 ---
 
