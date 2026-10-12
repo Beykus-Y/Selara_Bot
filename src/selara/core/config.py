@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     db_command_timeout_seconds: float = Field(default=120.0, validation_alias="DB_COMMAND_TIMEOUT_SECONDS", gt=0)
     # Updates that may hold a pooled connection at once. Kept below pool capacity so a burst waits in memory.
     db_max_concurrent_updates: int = Field(default=20, validation_alias="DB_MAX_CONCURRENT_UPDATES", ge=1)
+    # Telegram updates handled at once. Updates beyond this wait at Telegram instead of piling up in memory.
+    telegram_update_concurrency_limit: int = Field(default=40, validation_alias="TELEGRAM_UPDATE_CONCURRENCY_LIMIT", ge=1)
     redis_url: str = Field(default="redis://localhost:6379/0", validation_alias="REDIS_URL")
     game_state_ttl_hours: int = Field(default=24, validation_alias="GAME_STATE_TTL_HOURS")
     activity_batch_flush_seconds: int = Field(default=5, validation_alias="ACTIVITY_BATCH_FLUSH_SECONDS")
