@@ -1206,7 +1206,7 @@ async def test_warm_up_retries_a_card_that_found_the_render_slot_busy_after_the_
 
     async def resolve_side_effect(*, landing_card_code, **kwargs):
         calls.append(landing_card_code)
-        if calls.count("furina") == 1:
+        if landing_card_code == "furina" and calls.count("furina") == 1:
             raise orch.GachaRenderBusyError("busy")
         return resolved
 

@@ -195,8 +195,8 @@ async def test_gacha_buy_callback_delivers_classic_result_without_retry_alert_wh
 
     resolve_mock.assert_awaited_once()
     assert resolve_mock.await_args.kwargs["allow_render"] is False
-    # The background render only starts once the loop runs it, so let the spawned task finish first.
-    await asyncio.gather(*list(text_commands._GACHA_BACKGROUND_TASKS), return_exceptions=True)
+    # The background render is a task that starts on the next loop iteration.
+    await asyncio.sleep(0)
     _no_background_reel_render.assert_awaited_once()
     bot.send_animation.assert_not_awaited()
     purchase_mock.assert_awaited_once()  # the real pull result must still go through

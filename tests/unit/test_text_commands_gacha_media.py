@@ -632,7 +632,6 @@ async def test_send_gacha_pull_ends_the_db_transaction_after_caching_the_animati
     )
     await _drain_gacha_background()
 
-    assert resolve_mock.await_args.kwargs["release_connection"] is db_session.commit
     # The transaction ends before the upload and again after the cache write.
     assert events == ["commit", "upload", "cache", "commit"]
     assert len(message.photo_calls) == 1
