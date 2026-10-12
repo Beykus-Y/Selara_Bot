@@ -49,14 +49,16 @@ Driver читает checksum `/usr/share/nginx/html/index.html` из запущ�
 до продвижения current/previous release metadata.
 
 Проверки идут тремя gate по порядку: `local readiness` (`/readyz` внутри app),
-`public readiness` (`WEB_BASE_URL/miniapp/readyz`, требуются database, redis и
-polling) и `public frontend` (checksum). Каждый gate повторяется с паузой 5 секунд
-до дедлайна 120 секунд от старта gate; каждый request имеет timeout 5s. Лог
-показывает, какой gate прошёл и сколько проб понадобилось, либо какой gate
-не прошёл к дедлайну. Медленный холодный старт внутри окна не считается ошибкой;
-реальная ошибка, которая держится до дедлайна, останавливает deploy без записи
-release metadata. Если reverse proxy переписывает HTML, проверка checksum не
-пройдёт: production route должен отдавать оригинальный frontend document.
+`public frontend` (checksum) и `public readiness` (`WEB_BASE_URL/miniapp/readyz`,
+требуются database, redis и polling). Все gate делят один дедлайн 120 секунд от
+начала проверок; проба повторяется каждые 5 секунд, и ни одна проба не начинается
+на дедлайне или после него. Каждый request имеет timeout 5s. Публичная readiness стоит
+последней, поэтому последняя проба перед promote — именно readiness. Лог показывает,
+какой gate прошёл и сколько проб понадобилось, либо какой gate не прошёл к дедлайну.
+Медленный холодный старт внутри окна не считается ошибкой; реальная ошибка, которая
+держится до дедлайна, останавливает deploy без записи release metadata. Если reverse
+proxy переписывает HTML, проверка checksum не пройдёт: production route должен
+отдавать оригинальный frontend document.
 
 Если deploy упал, когда контейнеры уже работают и приложение здорово, повторно
 запустите `Deploy To VPS` с тем же

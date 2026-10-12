@@ -156,9 +156,10 @@ def test_persistent_health_failure_stops_at_deadline_and_preserves_known_release
         release.deploy_release(manifest(), tmp_path, runner=runner, clock=clock, sleeper=clock.sleep)
     assert json.loads((tmp_path / "current.json").read_text()) == old
     assert not (tmp_path / "previous.json").exists()
-    assert clock.now == release.HEALTH_TIMEOUT_SECONDS
+    # Probes start at 0, 5, ..., 115 s; none starts at or after the 120 s deadline.
+    assert clock.now < release.HEALTH_TIMEOUT_SECONDS
     probes = [call for call in runner.calls if call[:2] == ("exec", "app-container")]
-    assert len(probes) == release.HEALTH_TIMEOUT_SECONDS // release.HEALTH_INTERVAL_SECONDS + 1
+    assert len(probes) == release.HEALTH_TIMEOUT_SECONDS // release.HEALTH_INTERVAL_SECONDS
 
 
 def test_known_release_id_cannot_be_rebound_to_new_digest(tmp_path):
@@ -229,6 +230,41 @@ def test_deploy_probes_local_and_public_readiness_and_exact_frontend(tmp_path, m
     else:
         release.deploy_release(manifest(), tmp_path, runner=probe_runner, clock=clock, sleeper=clock.sleep)
         assert {"http://127.0.0.1:8080/readyz", "https://bot.example.com/miniapp/readyz", "https://bot.example.com/miniapp/"} <= set(visited)
+
+
+def test_readiness_is_checked_after_a_slow_frontend_so_polling_loss_is_not_promoted(tmp_path, monkeypatch, clock):
+    import urllib.request
+
+    monkeypatch.setenv("WEB_BASE_URL", "https://bot.example.com/")
+    monkeypatch.setenv("WEB_PORT", "8080")
+
+    def public_http(url, timeout):
+        if url.endswith("/miniapp/"):
+            # The public frontend only switches to the new build at 60 s.
+            body = b'<html><div id="root"></div></html>\n' if clock.now >= 60 else b"old build"
+        else:
+            # Polling is healthy at the start and stops at 30 s, during the frontend wait.
+            body = json.dumps({"status": "ok", "checks": {
+                "database": True, "redis": True, "polling": clock.now < 30,
+                "game_store_redis": "connected",
+            }}).encode()
+        return type("Response", (), {"read": lambda self: body})()
+
+    monkeypatch.setattr(urllib.request, "urlopen", public_http)
+    runner = DockerFake(manifest())
+
+    def probe_runner(*args, env):
+        result = runner(*args, env=env)
+        if args[:2] == ("exec", "app-container"):
+            try:
+                exec(args[-1], {})
+            except AssertionError as error:
+                raise subprocess.CalledProcessError(1, args) from error
+        return result
+
+    with pytest.raises(subprocess.CalledProcessError):
+        release.deploy_release(manifest(), tmp_path, runner=probe_runner, clock=clock, sleeper=clock.sleep)
+    assert not (tmp_path / "current.json").exists()
 
 
 def test_release_workflows_use_manifest_and_fail_before_ssh():
