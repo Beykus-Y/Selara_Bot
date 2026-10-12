@@ -63,7 +63,7 @@ def _patch_startup(
     monkeypatch.setattr(main_module, "_build_stt_client", lambda settings: None)
     monkeypatch.setattr(main_module, "_build_llm_client", lambda settings, session_factory=None: None)
     monkeypatch.setattr(main_module, "build_web_search_client", lambda **kwargs: None)
-    monkeypatch.setattr(main_module, "PaymentSafeDispatcher", lambda: dispatcher)
+    monkeypatch.setattr(main_module, "PaymentSafeDispatcher", lambda **_kwargs: dispatcher)
     monkeypatch.setattr(main_module, "DatabaseAdmission", SimpleNamespace(from_settings=lambda settings: object()))
     monkeypatch.setattr(main_module, "build_router", lambda *args, **kwargs: object())
     monkeypatch.setattr(main_module, "build_personal_config", lambda session_factory, settings: (None, None))
