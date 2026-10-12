@@ -2808,7 +2808,9 @@ async def _send_gacha_pull_impl(
         animation_wanted = response.card is not None and await activity_repo.is_gacha_animation_enabled(
             user_id=message.from_user.id
         )
-        cache_ready = animation_wanted and await is_gacha_animation_cache_ready(settings, activity_repo)
+        cache_ready = animation_wanted and await is_gacha_animation_cache_ready(
+            settings, activity_repo, banner=banner
+        )
     except Exception:
         # is_gacha_animation_cache_ready calls out to the gacha service over
         # the network — if that fails, the already-computed result below
@@ -5525,7 +5527,9 @@ async def _gacha_callback_impl(
             animation_wanted = response.card is not None and await activity_repo.is_gacha_animation_enabled(
                 user_id=query.from_user.id
             )
-            cache_ready = animation_wanted and await is_gacha_animation_cache_ready(settings, activity_repo)
+            cache_ready = animation_wanted and await is_gacha_animation_cache_ready(
+                settings, activity_repo, banner=banner
+            )
         except Exception:
             logger.warning("Gacha animation readiness check failed, delivering classic result", exc_info=True)
             animation_wanted = False
