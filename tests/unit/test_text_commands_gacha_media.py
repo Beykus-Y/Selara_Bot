@@ -573,6 +573,41 @@ async def test_send_gacha_pull_returns_while_the_animation_is_held_and_keeps_the
 
 
 @pytest.mark.asyncio
+async def test_shutdown_ends_the_animation_hold_and_still_delivers_the_pull_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pull is committed before its hold starts. A restart during the hold must still send the result,
+    without waiting out the whole hold first."""
+    monkeypatch.setattr(text_commands, "_GACHA_SHUTDOWN", asyncio.Event())
+    monkeypatch.setattr(text_commands, "_GACHA_ANIMATION_HOLD_SECONDS", 60.0)
+    delete_mock = AsyncMock()
+    deliver_mock = AsyncMock()
+    monkeypatch.setattr(text_commands, "_delete_gacha_animation", delete_mock)
+    monkeypatch.setattr(text_commands, "_deliver_gacha_pull_response", deliver_mock)
+    message = _DummyMessage()
+    text_commands._GACHA_TEXT_PULL_IN_FLIGHT.add(message.from_user.id)
+
+    text_commands._spawn_gacha_background(
+        text_commands._finish_gacha_pull_after_animation(
+            message,
+            SimpleNamespace(),
+            AsyncMock(),
+            banner="genshin",
+            response=_gacha_pull_response_with_card(),
+            owner_user_id=message.from_user.id,
+            sent=SimpleNamespace(message_id=999),
+        )
+    )
+    await asyncio.sleep(0)
+
+    await asyncio.wait_for(text_commands.drain_gacha_background_tasks(timeout=5), timeout=10)
+
+    delete_mock.assert_awaited_once()
+    deliver_mock.assert_awaited_once()
+    assert message.from_user.id not in text_commands._GACHA_TEXT_PULL_IN_FLIGHT
+
+
+@pytest.mark.asyncio
 async def test_send_gacha_pull_ends_the_db_transaction_after_caching_the_animation(monkeypatch: pytest.MonkeyPatch) -> None:
     """The pooled connection must not sit in an open transaction through the
     animation: the caller's session is committed before any render and again

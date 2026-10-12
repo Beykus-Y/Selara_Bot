@@ -45,6 +45,7 @@ from selara.presentation.gacha_reel_orchestration import (
 )
 from selara.presentation.game_state import GAME_STORE
 from selara.presentation.handlers.game.router import restore_phase_timers
+from selara.presentation.handlers.text_commands import drain_gacha_background_tasks
 from selara.presentation.middlewares.error_alert_config import load_error_alert_config
 from selara.presentation.daily_summary import run_daily_summary_scheduler
 from selara.presentation.interesting_facts import run_interesting_facts_scheduler
@@ -328,6 +329,8 @@ async def _run_bot(settings, session_factory) -> None:
     try:
         await dispatcher.start_polling(bot, **polling_kwargs)
     finally:
+        # Pending gacha results go out while the bot session is still open, which happens further down.
+        await drain_gacha_background_tasks()
         mark_bot_polling_stopped()
         heartbeat_task.cancel()
         await asyncio.gather(heartbeat_task, return_exceptions=True)
