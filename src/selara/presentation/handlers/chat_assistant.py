@@ -35,6 +35,7 @@ from selara.presentation.audit import log_chat_action
 from selara.presentation.auth import has_permission, is_telegram_chat_admin
 from selara.presentation.targeting import NOT_CHAT_MEMBER_TEXT, is_target_active_chat_member, resolve_chat_target_user
 from selara.presentation.family_tree import build_family_tree_image
+from selara.presentation.renderer_service import RenderTimeoutError
 from selara.presentation.handlers.settings_common import settings_to_dict
 
 router = Router(name="chat_assistant")
@@ -1361,6 +1362,7 @@ async def adopt_daughter_command(message: Message, command: CommandObject, activ
 
 
 FAMILY_PET_RENAMED_HINT = "ℹ️ Команда «стать питомцем» теперь называется <code>/bepet</code>. Старая <code>/pet</code> скоро перейдёт к AI-питомцам."
+FAMILY_RENDER_TIMEOUT_TEXT = "Не получилось нарисовать древо: отрисовка заняла слишком много времени. Попробуйте ещё раз чуть позже."
 
 
 @router.message(Command("bepet"))
@@ -1437,16 +1439,21 @@ async def family_command(message: Message, command: CommandObject, activity_repo
         if resolved_bundle.spouse_user_id is None
         else await _resolve_display_label(activity_repo, chat_id=message.chat.id, user_id=resolved_bundle.spouse_user_id)
     )
-    image_bytes = await build_family_tree_image(
-        subject_label=subject_label,
-        grandparents=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=list(resolved_bundle.grandparents)),
-        parents=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=list(resolved_bundle.parents)),
-        step_parents=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=list(resolved_bundle.step_parents)),
-        spouse=spouse_label,
-        siblings=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=list(resolved_bundle.siblings)),
-        children=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=list(resolved_bundle.children)),
-        pets=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=list(resolved_bundle.pets)),
-    )
+    try:
+        image_bytes = await build_family_tree_image(
+            subject_label=subject_label,
+            grandparents=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=list(resolved_bundle.grandparents)),
+            parents=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=list(resolved_bundle.parents)),
+            step_parents=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=list(resolved_bundle.step_parents)),
+            spouse=spouse_label,
+            siblings=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=list(resolved_bundle.siblings)),
+            children=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=list(resolved_bundle.children)),
+            pets=await _build_family_section_labels(activity_repo, chat_id=message.chat.id, user_ids=list(resolved_bundle.pets)),
+        )
+    except RenderTimeoutError:
+        logger.warning("Family tree render timed out for chat_id=%s", message.chat.id)
+        await message.answer(FAMILY_RENDER_TIMEOUT_TEXT)
+        return
     await message.answer_photo(BufferedInputFile(image_bytes, filename="family_tree.png"))
 
 
