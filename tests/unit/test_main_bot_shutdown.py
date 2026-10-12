@@ -113,3 +113,10 @@ def test_stop_grace_period_outlasts_the_gacha_drain() -> None:
     # batcher's close grace of up to 5 s) also needs time, so the grace period keeps 10 s beyond the drain budget.
     assert grace.endswith("s")
     assert float(grace.removesuffix("s")) >= text_commands._GACHA_SHUTDOWN_DRAIN_SECONDS + 10
+
+
+def test_dockerfile_execs_the_bot_so_the_shutdown_signal_reaches_it() -> None:
+    dockerfile_lines = (Path(__file__).parents[2] / "Dockerfile").read_text(encoding="utf-8").splitlines()
+    cmd = next(line for line in dockerfile_lines if line.startswith("CMD "))
+    # Without exec, sh stays in front of the bot and does not forward SIGTERM, so the drain would never run.
+    assert "&& exec python -m selara.main" in cmd

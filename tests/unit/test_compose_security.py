@@ -43,8 +43,8 @@ def test_app_container_runs_non_root_and_hardened_like_renderer() -> None:
     # pids_limit counts threads; Chromium, ffmpeg and the asyncio thread pool
     # share it.
     assert app["pids_limit"] >= 512
-    # PID 1 is `sh -c "alembic upgrade head && python -m selara.main"`, which
-    # does not reap orphaned Chromium/crashpad children.
+    # tini is PID 1. It reaps orphaned Chromium/crashpad children, which the
+    # bot does not, and forwards SIGTERM to the bot.
     assert app["init"] is True
     tmpfs = next(str(entry) for entry in app["tmpfs"] if str(entry).startswith("/tmp:"))
     # The daily backup stages a pg_dump plus all of its ~45 MB split parts and
