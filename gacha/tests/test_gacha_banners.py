@@ -314,3 +314,69 @@ class TestStatistics:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
+
+
+class TestZzzBannerConfig:
+    """Zenless Zone Zero banner: roster, odds mirror HSR (S/A) plus Genshin mythic (Pyrois), placeholder fallback."""
+
+    @pytest.fixture
+    def zzz_config(self):
+        with open(CONFIG_DIR / "zzz.json", "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_zzz_banner_header(self, zzz_config):
+        assert zzz_config["code"] == "zzz"
+        assert zzz_config["title"] == "Zenless Zone Zero"
+        assert zzz_config["cooldown_seconds"] == 3600
+
+    def test_zzz_roster_has_46_s_rank_and_13_a_rank_agents(self, zzz_config):
+        rarities = [card["rarity"] for card in zzz_config["cards"]]
+        assert rarities.count("legendary") == 46
+        assert rarities.count("epic") == 13
+        assert rarities.count("mythic") == 1
+        assert len(rarities) == 60
+
+    def test_zzz_pyrois_is_the_only_mythic_special_agent(self, zzz_config):
+        mythic = [card for card in zzz_config["cards"] if card["rarity"] == "mythic"]
+        assert [card["code"] for card in mythic] == ["pyrois"]
+        assert mythic[0]["name"] == "Пироис (Pyrois)"
+        assert mythic[0]["points"] == 20000
+        assert mythic[0]["primogems"] == 44
+        assert mythic[0]["adventure_xp"] == 440
+        assert mythic[0]["weight"] == 5
+
+    def test_zzz_card_codes_are_unique(self, zzz_config):
+        codes = [card["code"] for card in zzz_config["cards"]]
+        assert len(codes) == len(set(codes))
+
+    def test_zzz_rarity_values_mirror_hsr(self, zzz_config):
+        expected = {
+            "legendary": {"points": 11000, "primogems": 22, "adventure_xp": 200, "weight": 1},
+            "epic": {"points": 5000, "primogems": 16, "adventure_xp": 150, "weight": 6},
+            "mythic": {"points": 20000, "primogems": 44, "adventure_xp": 440, "weight": 5},
+        }
+        for card in zzz_config["cards"]:
+            values = expected[card["rarity"]]
+            assert card["points"] == values["points"], card["code"]
+            assert card["primogems"] == values["primogems"], card["code"]
+            assert card["adventure_xp"] == values["adventure_xp"], card["code"]
+            assert card["weight"] == values["weight"], card["code"]
+
+    def test_zzz_image_paths_follow_banner_convention(self, zzz_config):
+        for card in zzz_config["cards"]:
+            assert card["image_url"] == f"/images/zzz/{card['code']}.jpg"
+
+    def test_missing_zzz_artwork_falls_back_to_placeholder(self):
+        from gacha_service.application.catalog import PLACEHOLDER_IMAGE_URL, resolve_card_image_url
+
+        assert resolve_card_image_url("/images/zzz/not_uploaded_yet.jpg") == PLACEHOLDER_IMAGE_URL
+        assert (IMAGES_DIR / "placeholder.jpg").is_file()
+        assert resolve_card_image_url(PLACEHOLDER_IMAGE_URL) == PLACEHOLDER_IMAGE_URL
+        assert resolve_card_image_url("https://example.com/card.png") == "https://example.com/card.png"
+
+    def test_zzz_config_keeps_canonical_artwork_urls(self, zzz_config):
+        # The placeholder is applied at response time only, so stored pulls keep the real path.
+        from gacha_service.application.catalog import get_banner_config
+
+        rina = next(card for card in get_banner_config("zzz").cards if card.code == "rina")
+        assert rina.image_url == "/images/zzz/rina.jpg"

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
@@ -10,8 +10,8 @@ from gacha_service.application.catalog import (
     get_card_for_banner,
     get_cards_for_banner,
 )
+from gacha_service.domain.banner_profiles import get_banner_profile
 from gacha_service.domain.models import (
-    RARITY_LABELS,
     RARITY_SUMMARY_ORDER,
     CardRarity,
     CurrencyGrantResult,
@@ -57,41 +57,6 @@ def _format_percentage(value: float) -> str:
     return f"{rounded:.1f}"
 
 
-@dataclass(frozen=True, slots=True)
-class _BannerTerms:
-    xp_label: str
-    rank_label: str
-    currency_label: str
-
-
-def _get_banner_terms(banner: str) -> _BannerTerms:
-    if banner == "hsr":
-        return _BannerTerms(
-            xp_label="Опыт освоения",
-            rank_label="Уровень освоения",
-            currency_label="Звездный нефрит",
-        )
-    return _BannerTerms(
-        xp_label="Опыт приключений",
-        rank_label="Ранг приключений",
-        currency_label="Примогемы",
-    )
-
-
-def _get_duplicate_stage_prefix(banner: str) -> str | None:
-    if banner == "genshin":
-        return "С"
-    if banner == "hsr":
-        return "E"
-    return None
-
-
-def _get_progression_reward_label(banner: str) -> str:
-    if banner == "hsr":
-        return "эйдолон"
-    return "созвездие"
-
-
 def _pick_card(cards: tuple[GachaCard, ...], rng: random.Random) -> GachaCard:
     weights = [card.weight for card in cards]
     return rng.choices(cards, weights=weights, k=1)[0]
@@ -105,7 +70,7 @@ def _resolve_reward_variant(
     if existing_copies <= 0:
         return card, "new", False
 
-    stage_prefix = _get_duplicate_stage_prefix(card.banner)
+    stage_prefix = get_banner_profile(card.banner).duplicate_stage_prefix
     if stage_prefix is None:
         return card, "duplicate", False
 
@@ -128,7 +93,7 @@ def _resolve_adventure_xp_gain(base_xp: int, existing_copies: int) -> int:
 
 
 def _render_card_origin_block(card: GachaCard) -> str:
-    if card.banner != "genshin":
+    if not get_banner_profile(card.banner).shows_origin:
         return ""
     region_label = format_region_label(card.region_code)
     element_label = format_element_label(card.element_code)
@@ -176,13 +141,13 @@ def _render_success_message(
     purchase_price: int = 0,
 ) -> str:
     rank, xp_into_rank, xp_for_next_rank = resolve_rank(player.adventure_xp)
-    rarity_label = RARITY_LABELS[card.rarity]
-    terms = _get_banner_terms(card.banner)
+    terms = get_banner_profile(card.banner)
+    rarity_label = terms.rarity_labels[card.rarity]
     origin_block = _render_card_origin_block(card)
     if outcome == "new":
         card_line = "🍀 Вы получили новую карту"
     elif outcome == "constellation":
-        card_line = f"✨ Вы получили {_get_progression_reward_label(card.banner)}"
+        card_line = f"✨ Вы получили {terms.progression_reward_label}"
     else:
         card_line = "♻️ Вам выпал дубликат"
     purchase_block = ""
@@ -210,7 +175,7 @@ def _render_success_message(
 
 def _render_cooldown_message(player: PlayerState, *, banner: str, seconds_remaining: int) -> str:
     rank, xp_into_rank, xp_for_next_rank = resolve_rank(player.adventure_xp)
-    terms = _get_banner_terms(banner)
+    terms = get_banner_profile(banner)
     return (
         "⏳ Новая карта пока недоступна.\n\n"
         f"🧭 {terms.rank_label}: {rank} ({xp_into_rank}/{xp_for_next_rank})\n"
@@ -230,13 +195,13 @@ def _render_admin_grant_message(
     ownership_percent: float,
 ) -> str:
     rank, xp_into_rank, xp_for_next_rank = resolve_rank(player.adventure_xp)
-    rarity_label = RARITY_LABELS[card.rarity]
-    terms = _get_banner_terms(card.banner)
+    terms = get_banner_profile(card.banner)
+    rarity_label = terms.rarity_labels[card.rarity]
     origin_block = _render_card_origin_block(card)
     if outcome == "new":
         card_line = "🎁 Админ выдал новую карту"
     elif outcome == "constellation":
-        card_line = f"🎁 Админ выдал {_get_progression_reward_label(card.banner)}"
+        card_line = f"🎁 Админ выдал {terms.progression_reward_label}"
     else:
         card_line = "🎁 Админ выдал дубликат"
     return (
@@ -254,12 +219,12 @@ def _render_admin_grant_message(
 
 
 def _render_sell_message(*, banner: str, sale_price: int, player: PlayerState) -> str:
-    terms = _get_banner_terms(banner)
+    terms = get_banner_profile(banner)
     return f"Продажа: +{sale_price} {terms.currency_label.lower()}. Баланс: {player.total_primogems}."
 
 
 def _render_currency_grant_message(*, banner: str, amount: int, player: PlayerState) -> str:
-    terms = _get_banner_terms(banner)
+    terms = get_banner_profile(banner)
     if amount > 0:
         return f"Баланс пополнен: +{amount} {terms.currency_label.lower()}. На счету: {player.total_primogems}."
     normalized_amount = abs(amount)
@@ -321,7 +286,7 @@ class GachaService:
         current_time = now or _utc_now()
         player = await self._prepare_player_for_pull(user_id=user_id, username=username, banner=banner)
         if player.total_primogems < PAID_PULL_PRICE:
-            terms = _get_banner_terms(banner)
+            terms = get_banner_profile(banner)
             raise ValueError(
                 f"Недостаточно {terms.currency_label.lower()}. Нужно {PAID_PULL_PRICE}, у вас {player.total_primogems}."
             )
