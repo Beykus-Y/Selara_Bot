@@ -74,7 +74,7 @@ _ZZZ = GachaBannerProfile(
     currency_genitive="полихромов",
     currency_short_genitive="полихромов",
     rank_label="Уровень Интернота",
-    info_rank_label="Уровень",
+    info_rank_label="Уровень Интернота",
     info_currency_label="Полихромы",
 )
 

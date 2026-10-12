@@ -380,3 +380,11 @@ class TestZzzBannerConfig:
 
         rina = next(card for card in get_banner_config("zzz").cards if card.code == "rina")
         assert rina.image_url == "/images/zzz/rina.jpg"
+
+
+def test_profile_rank_labels_per_banner() -> None:
+    from gacha_service.domain.banner_profiles import get_banner_profile
+
+    assert get_banner_profile("genshin").profile_rank_label == "Ранг"
+    assert get_banner_profile("hsr").profile_rank_label == "Освоение"
+    assert get_banner_profile("zzz").profile_rank_label == "Уровень Интернота"
