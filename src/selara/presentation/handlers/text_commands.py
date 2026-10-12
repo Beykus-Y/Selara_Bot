@@ -5,6 +5,8 @@ import random
 import re
 import hashlib
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from os.path import basename
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -178,9 +180,12 @@ _GACHA_CALLBACK_IN_FLIGHT: set[tuple[int, int]] = set()
 _GACHA_TEXT_PULL_IN_FLIGHT: set[int] = set()
 # Fire-and-forget gacha tasks (animation tails, preparing notices), each kept alive until it ends.
 _GACHA_BACKGROUND_TASKS: set[asyncio.Task] = set()
+# Gacha update handlers still running. Shutdown waits for them, so a pull result that is being sent still goes out.
+_GACHA_PULL_HANDLER_TASKS: set[asyncio.Task] = set()
 # Set at shutdown so pending animation holds end early and their pull results still go out.
 _GACHA_SHUTDOWN = asyncio.Event()
-_GACHA_SHUTDOWN_DRAIN_SECONDS = 5.0
+# Stays below docker-compose stop_grace_period (30 s), which also has to cover the cleanup after the drain.
+_GACHA_SHUTDOWN_DRAIN_SECONDS = 20.0
 
 
 def _gacha_message_lock_key(message: Message) -> tuple[int, int]:
@@ -2737,11 +2742,22 @@ async def _hold_gacha_animation() -> None:
         shutdown.cancel()
 
 
+@contextmanager
+def _tracked_gacha_pull_handler() -> Iterator[None]:
+    """Keeps the update handler that runs a gacha action in _GACHA_PULL_HANDLER_TASKS until the handler returns."""
+    task = asyncio.current_task()
+    _GACHA_PULL_HANDLER_TASKS.add(task)
+    try:
+        yield
+    finally:
+        _GACHA_PULL_HANDLER_TASKS.discard(task)
+
+
 async def drain_gacha_background_tasks(timeout: float = _GACHA_SHUTDOWN_DRAIN_SECONDS) -> None:
-    """Shutdown: end the animation holds early and wait, at most `timeout` seconds, for the pending tasks.
+    """Shutdown: end the animation holds early and wait, at most `timeout` seconds, for the pending tasks and handlers.
     A pull is already committed when its hold starts, so a restart during the hold must still deliver its result."""
     _GACHA_SHUTDOWN.set()
-    pending = set(_GACHA_BACKGROUND_TASKS)
+    pending = _GACHA_BACKGROUND_TASKS | _GACHA_PULL_HANDLER_TASKS
     if pending:
         await asyncio.wait(pending, timeout=timeout)
 
@@ -2782,6 +2798,9 @@ async def _send_gacha_pull_animation(
     `release_connection` ends the caller's transaction before a render and
     again after the cache write, so no pooled connection sits idle while the
     animation is shown."""
+    if _GACHA_SHUTDOWN.is_set():
+        # Shutdown has started. A render would outlast the drain, so the instant result goes out without an animation.
+        return None
     try:
         resolved = await resolve_gacha_reel_animation(
             settings=settings,
@@ -2850,7 +2869,7 @@ async def _try_send_gacha_pull_animation(
     if sent is None:
         return
     try:
-        await asyncio.sleep(_GACHA_ANIMATION_HOLD_SECONDS)
+        await _hold_gacha_animation()
         await _delete_gacha_animation(bot, message, sent)
     except Exception:
         logger.warning(
@@ -2903,15 +2922,16 @@ async def _send_gacha_pull(
     _GACHA_TEXT_PULL_IN_FLIGHT.add(user_id)
     handed_off = False
     try:
-        handed_off = await _send_gacha_pull_impl(
-            message,
-            settings,
-            bot,
-            activity_repo,
-            banner=banner,
-            session_factory=session_factory,
-            db_session=db_session,
-        )
+        with _tracked_gacha_pull_handler():
+            handed_off = await _send_gacha_pull_impl(
+                message,
+                settings,
+                bot,
+                activity_repo,
+                banner=banner,
+                session_factory=session_factory,
+                db_session=db_session,
+            )
     finally:
         # A background tail that is still holding the animation keeps the marker until it has delivered the result.
         if not handed_off:
@@ -5628,16 +5648,17 @@ async def gacha_callback(
 
     _GACHA_CALLBACK_IN_FLIGHT.add(lock_key)
     try:
-        await _gacha_callback_impl(
-            query,
-            bot=bot,
-            settings=settings,
-            economy_repo=economy_repo,
-            activity_repo=activity_repo,
-            chat_settings=chat_settings,
-            session_factory=session_factory,
-            db_session=db_session,
-        )
+        with _tracked_gacha_pull_handler():
+            await _gacha_callback_impl(
+                query,
+                bot=bot,
+                settings=settings,
+                economy_repo=economy_repo,
+                activity_repo=activity_repo,
+                chat_settings=chat_settings,
+                session_factory=session_factory,
+                db_session=db_session,
+            )
     finally:
         _GACHA_CALLBACK_IN_FLIGHT.discard(lock_key)
 

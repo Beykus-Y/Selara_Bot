@@ -64,6 +64,9 @@ services:
       dockerfile: Dockerfile
     container_name: selara-app
     restart: unless-stopped
+    # The shutdown drain waits up to 20 s for pending gacha results (_GACHA_SHUTDOWN_DRAIN_SECONDS), then the
+    # cleanup runs. Docker's default 10 s would SIGKILL the process before that.
+    stop_grace_period: 30s
     init: true
     user: "10001:10001"
     read_only: true
