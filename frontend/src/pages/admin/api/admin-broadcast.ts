@@ -61,7 +61,8 @@ async function postData<T>(path: string, payload: Record<string, unknown>, fallb
     const response = typeof error === 'object' && error !== null && 'response' in error
       ? (error as { response?: { status?: number; data?: { message?: string; detail?: string } } }).response
       : undefined
-    const message = response?.data?.message ?? response?.data?.detail
+    const responseMessage = response?.data
+    const message = responseMessage?.message ?? responseMessage?.detail
     if (typeof message === 'string') throw new Error(message, { cause: error })
     // A proxy rejects oversized bodies with an HTML 413 before the app can answer with JSON.
     if (response?.status === 413) {
