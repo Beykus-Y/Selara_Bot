@@ -230,7 +230,7 @@ async def _run_bot(settings, session_factory) -> None:
     )
     logger.info("Web search client: %s",
                 f"OK ({web_search_client.provider_name})" if web_search_client is not None else "None (disabled)")
-    dispatcher = PaymentSafeDispatcher()
+    dispatcher = PaymentSafeDispatcher(max_pending_updates=settings.telegram_pending_updates_limit)
     db_admission = DatabaseAdmission.from_settings(settings)
     dispatcher.include_router(
         build_router(

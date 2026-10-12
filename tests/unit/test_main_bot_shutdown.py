@@ -28,6 +28,7 @@ def _settings() -> SimpleNamespace:
         gacha_warmup_enabled=False,
         admin_user_id=None,
         telegram_update_concurrency_limit=40,
+        telegram_pending_updates_limit=2000,
         activity_batch_flush_seconds=1.0,
         activity_batch_max_events=100,
         activity_batch_close_grace_seconds=5.0,
@@ -62,7 +63,7 @@ def _patch_startup(
     monkeypatch.setattr(main_module, "_build_stt_client", lambda settings: None)
     monkeypatch.setattr(main_module, "_build_llm_client", lambda settings, session_factory=None: None)
     monkeypatch.setattr(main_module, "build_web_search_client", lambda **kwargs: None)
-    monkeypatch.setattr(main_module, "PaymentSafeDispatcher", lambda: dispatcher)
+    monkeypatch.setattr(main_module, "PaymentSafeDispatcher", lambda **_kwargs: dispatcher)
     monkeypatch.setattr(main_module, "DatabaseAdmission", SimpleNamespace(from_settings=lambda settings: object()))
     monkeypatch.setattr(main_module, "build_router", lambda *args, **kwargs: object())
     monkeypatch.setattr(main_module, "build_personal_config", lambda session_factory, settings: (None, None))

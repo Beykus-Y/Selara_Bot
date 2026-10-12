@@ -1289,3 +1289,203 @@ async def test_warm_up_defers_a_card_whose_upload_runs_out_of_time_and_sends_it_
     activity_repo.add_gacha_animation_variant.assert_awaited_once_with(
         banner="genshin", card_code="amber", telegram_file_id="warmup-file-id", cache_version="v1"
     )
+
+
+@pytest.mark.asyncio
+async def test_a_render_that_cannot_get_the_slot_downloads_no_portraits(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """Portraits used to be fetched before the slot was taken, so every pull on a cold card downloaded eleven of them
+    even though only one render could run. A task that is turned away now fetches nothing."""
+    monkeypatch.setattr(orch, "_get_banner_catalog", AsyncMock(return_value=_render_test_catalog()))
+    fetch_mock = AsyncMock(return_value=b"img-bytes")
+    monkeypatch.setattr(orch, "_fetch_bytes_cached", fetch_mock)
+    assert orch._render_slot.acquire(blocking=False)  # another render holds the slot
+    try:
+        with pytest.raises(orch.GachaRenderBusyError):
+            await orch._render_reel_gif(**_render_kwargs(tmp_path))
+    finally:
+        orch._render_slot.release()
+
+    fetch_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_waiting_render_fetches_portraits_only_once_it_holds_the_slot(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.setattr(orch, "_get_banner_catalog", AsyncMock(return_value=_render_test_catalog()))
+    fetch_mock = AsyncMock(return_value=b"img-bytes")
+    monkeypatch.setattr(orch, "_fetch_bytes_cached", fetch_mock)
+    monkeypatch.setattr(orch, "build_gacha_reel_animation", lambda **kwargs: _valid_mp4_bytes())
+    assert orch._render_slot.acquire(blocking=False)
+    fetched_while_waiting: list[bool] = []
+
+    async def release_slot_after_a_while() -> None:
+        await asyncio.sleep(0.05)
+        fetched_while_waiting.append(fetch_mock.await_count > 0)
+        orch._render_slot.release()
+
+    releaser = asyncio.create_task(release_slot_after_a_while())
+    try:
+        result = await orch._render_reel_gif(**_render_kwargs(tmp_path), wait_for_slot=True, slot_timeout=5)
+    finally:
+        await releaser
+
+    assert fetched_while_waiting == [False]
+    assert fetch_mock.await_count == 2  # one filler and the landing card, fetched once by the task that rendered
+    assert result == _valid_mp4_bytes()
+
+
+@pytest.mark.asyncio
+async def test_render_releases_the_slot_when_a_portrait_download_fails(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.setattr(orch, "_get_banner_catalog", AsyncMock(return_value=_render_test_catalog()))
+    monkeypatch.setattr(orch, "_fetch_bytes_cached", AsyncMock(side_effect=httpx.ConnectError("network down")))
+
+    with pytest.raises(httpx.ConnectError):
+        await orch._render_reel_gif(**_render_kwargs(tmp_path))
+
+    assert orch._render_slot.acquire(blocking=False)
+    orch._render_slot.release()
+
+
+@pytest.mark.asyncio
+async def test_render_releases_the_slot_when_its_downloads_are_cut_off(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """A download that is still running when a caller gives up is cancelled while the slot is held. The slot must still
+    come back, because no render thread exists yet to release it."""
+
+    async def hanging_fetch(client, url) -> bytes:
+        await asyncio.sleep(10)
+        return b"img-bytes"
+
+    monkeypatch.setattr(orch, "_get_banner_catalog", AsyncMock(return_value=_render_test_catalog()))
+    monkeypatch.setattr(orch, "_fetch_bytes_cached", hanging_fetch)
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(orch._render_reel_gif(**_render_kwargs(tmp_path)), timeout=0.05)
+
+    assert orch._render_slot.acquire(blocking=False)
+    orch._render_slot.release()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_portrait_download_cancels_its_siblings_before_the_slot_is_given_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """The slot is given back as soon as the render call fails. A sibling download still running then would keep a request
+    open against a client that is already closing, while another render starts downloading beside it."""
+    monkeypatch.setattr(orch, "_get_banner_catalog", AsyncMock(return_value=_render_test_catalog()))
+    calls: list[str] = []
+    sibling_cancelled: list[bool] = []
+
+    async def fetch(client, url) -> bytes:
+        calls.append(url)
+        if len(calls) == 1:
+            raise httpx.ConnectError("network down")
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            sibling_cancelled.append(True)
+            raise
+        return b"img-bytes"
+
+    monkeypatch.setattr(orch, "_fetch_bytes_cached", fetch)
+
+    with pytest.raises(httpx.ConnectError):
+        await orch._render_reel_gif(**_render_kwargs(tmp_path))
+
+    assert len(calls) > 1
+    assert len(sibling_cancelled) == len(calls) - 1  # every sibling had finished cancelling when the error surfaced
+    assert orch._render_slot.acquire(blocking=False)
+    orch._render_slot.release()
+
+
+@pytest.mark.asyncio
+async def test_a_hung_admin_delete_keeps_the_cached_file_id_and_the_card_is_not_sent_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The delete used to share the upload budget and the transaction. Once Telegram had accepted the file, a hung delete
+    timed the card out, the session rolled back the file_id, and the next pass uploaded the same MP4 again."""
+    orch._ready_animation_banners.clear()
+    monkeypatch.setattr(orch, "_WARMUP_DELETE_SECONDS", 0.05)
+    monkeypatch.setattr(
+        orch, "_get_banner_catalog",
+        AsyncMock(side_effect=lambda settings, banner: _warm_up_catalog("amber") if banner == "genshin" else SimpleNamespace(cards=[])),
+    )
+    activity_repo = _warm_up_repo()
+    resolved = SimpleNamespace(payload=BufferedInputFile(b"mp4", filename="x.mp4"), needs_caching=True, cache_version="v1")
+    monkeypatch.setattr(orch, "resolve_gacha_reel_animation", AsyncMock(return_value=resolved))
+    events: list[str] = []
+
+    async def hung_delete(**_kwargs) -> None:
+        events.append("delete")
+        await asyncio.sleep(10)
+
+    bot = AsyncMock()
+    bot.send_animation = AsyncMock(return_value=SimpleNamespace(message_id=42, animation=SimpleNamespace(file_id="warmup-file-id")))
+    bot.delete_message = AsyncMock(side_effect=hung_delete)
+    on_card_done = AsyncMock(side_effect=lambda: events.append("commit"))
+    on_card_error = AsyncMock()
+
+    await asyncio.wait_for(
+        orch.warm_up_gacha_animation_cache(
+            settings=SimpleNamespace(gacha_admin_user_id=905302972), bot=bot, activity_repo=activity_repo,
+            on_card_done=on_card_done, on_card_error=on_card_error,
+        ),
+        timeout=5,
+    )
+
+    bot.send_animation.assert_awaited_once()
+    activity_repo.add_gacha_animation_variant.assert_awaited_once_with(
+        banner="genshin", card_code="amber", telegram_file_id="warmup-file-id", cache_version="v1"
+    )
+    on_card_error.assert_not_awaited()
+    assert events == ["commit", "delete"]  # committed first, then the delete was attempted
+
+
+@pytest.mark.asyncio
+async def test_a_failed_admin_delete_does_not_roll_back_the_card(monkeypatch: pytest.MonkeyPatch) -> None:
+    orch._ready_animation_banners.clear()
+    monkeypatch.setattr(
+        orch, "_get_banner_catalog",
+        AsyncMock(side_effect=lambda settings, banner: _warm_up_catalog("amber") if banner == "genshin" else SimpleNamespace(cards=[])),
+    )
+    activity_repo = _warm_up_repo()
+    resolved = SimpleNamespace(payload=BufferedInputFile(b"mp4", filename="x.mp4"), needs_caching=True, cache_version="v1")
+    monkeypatch.setattr(orch, "resolve_gacha_reel_animation", AsyncMock(return_value=resolved))
+    bot = AsyncMock()
+    bot.send_animation = AsyncMock(return_value=SimpleNamespace(message_id=42, animation=SimpleNamespace(file_id="warmup-file-id")))
+    bot.delete_message = AsyncMock(side_effect=RuntimeError("telegram said no"))
+    on_card_done = AsyncMock()
+    on_card_error = AsyncMock()
+
+    await orch.warm_up_gacha_animation_cache(
+        settings=SimpleNamespace(gacha_admin_user_id=905302972), bot=bot, activity_repo=activity_repo,
+        on_card_done=on_card_done, on_card_error=on_card_error,
+    )
+
+    on_card_done.assert_awaited_once()
+    on_card_error.assert_not_awaited()
+    activity_repo.add_gacha_animation_variant.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_slow_cache_write_after_an_accepted_upload_is_not_cut_off_by_the_upload_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only the send is bounded by the upload budget. Once Telegram has accepted the file, a slow cache write must finish,
+    or the card is sent again on the next pass."""
+    orch._ready_animation_banners.clear()
+    monkeypatch.setattr(orch, "_WARMUP_UPLOAD_SECONDS", 0.05)
+    monkeypatch.setattr(
+        orch, "_get_banner_catalog",
+        AsyncMock(side_effect=lambda settings, banner: _warm_up_catalog("amber") if banner == "genshin" else SimpleNamespace(cards=[])),
+    )
+    activity_repo = _warm_up_repo()
+
+    async def slow_add(**_kwargs) -> None:
+        await asyncio.sleep(0.2)
+
+    activity_repo.add_gacha_animation_variant = AsyncMock(side_effect=slow_add)
+    resolved = SimpleNamespace(payload=BufferedInputFile(b"mp4", filename="x.mp4"), needs_caching=True, cache_version="v1")
+    monkeypatch.setattr(orch, "resolve_gacha_reel_animation", AsyncMock(return_value=resolved))
+    bot = AsyncMock()
+    bot.send_animation = AsyncMock(return_value=SimpleNamespace(message_id=42, animation=SimpleNamespace(file_id="warmup-file-id")))
+    bot.delete_message = AsyncMock()
+
+    await orch.warm_up_gacha_animation_cache(settings=SimpleNamespace(gacha_admin_user_id=905302972), bot=bot, activity_repo=activity_repo)
+
+    bot.send_animation.assert_awaited_once()
+    activity_repo.add_gacha_animation_variant.assert_awaited_once()

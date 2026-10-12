@@ -41,6 +41,8 @@ _RENDER_SLOT_POLL_SECONDS = 1.0
 _WARMUP_SLOT_WAIT_SECONDS = 120.0
 _WARMUP_RENDER_SECONDS = 60.0
 _WARMUP_UPLOAD_SECONDS = 60.0
+# The admin message is deleted after the cache write is committed, on a budget of its own. See _delete_warmup_message.
+_WARMUP_DELETE_SECONDS = 15.0
 # Hard ceiling on one card attempt. It covers the three stages above and the catalog and image fetches, which have no
 # budget of their own. Without it, a hung network call (e.g. a dead-but-not-closed connection to Telegram) blocks the
 # whole sequential warmup loop forever with no exception and no log line (found live, 2026-08-19: warmup stalled on one
@@ -113,6 +115,21 @@ async def _fetch_bytes_cached(client: httpx.AsyncClient, url: str) -> bytes:
     else:
         _image_cache.pop(url, None)
     return content
+
+
+async def _fetch_portraits(client: httpx.AsyncClient, filler_urls: list[str], landing_url: str) -> tuple[list[bytes], bytes]:
+    """Downloads the filler and landing portraits together. When one fails, the others are cancelled and awaited before the
+    error is raised again, so no request outlives the render slot that the caller gives back next."""
+    downloads = [asyncio.create_task(_fetch_bytes_cached(client, url)) for url in (*filler_urls, landing_url)]
+    try:
+        results = await asyncio.gather(*downloads)
+    except BaseException:
+        for download in downloads:
+            download.cancel()
+        await asyncio.gather(*downloads, return_exceptions=True)
+        raise
+    return list(results[:-1]), results[-1]
+
 
 _BACKGROUND_PATH = Path(__file__).resolve().parents[1] / "images" / "gacha_animation" / "reel_background_genshin.png"
 
@@ -276,7 +293,11 @@ async def _render_reel_gif(
     render_timeout: float | None = None,
 ) -> bytes:
     """`slot_timeout` bounds the wait for the render slot (GachaRenderBusyError when it passes). `render_timeout` bounds
-    the render itself. A render cut off by it keeps running in its thread and still writes its MP4 to disk."""
+    the render itself. A render cut off by it keeps running in its thread and still writes its MP4 to disk.
+
+    The portraits are downloaded only once the slot is held. A task that has to wait therefore holds no image bytes, and
+    the task that renders is the only one that fetches them. The slot is given back on every exit before the render thread
+    takes it over."""
     catalog = await _get_banner_catalog(settings, banner)
     filler_pool = [card for card in catalog.cards if card.code != landing_card_code] or list(catalog.cards)
     if not filler_pool:
@@ -288,43 +309,42 @@ async def _render_reel_gif(
     if landing_image_url is None:
         raise GachaUseCaseError(f"Карта {landing_card_code} не найдена в каталоге баннера {banner}.")
 
-    async with httpx.AsyncClient(timeout=settings.gacha_timeout_seconds, follow_redirects=True) as client:
-        filler_bytes, landing_image_bytes = await asyncio.gather(
-            asyncio.gather(*(_fetch_bytes_cached(client, card.image_url) for card in chosen)),
-            _fetch_bytes_cached(client, landing_image_url),
-        )
-    filler_cards = [
-        ReelCard(
-            name=card.name,
-            rarity_label=card.rarity_label,
-            border_color=_rarity_border_color(card.rarity),
-            image_bytes=image_bytes,
-        )
-        for card, image_bytes in zip(chosen, filler_bytes, strict=True)
-    ]
-
-    landing_card = ReelCard(
-        name=landing_card_name,
-        rarity_label=landing_rarity_label,
-        border_color=landing_border_color,
-        image_bytes=landing_image_bytes,
-    )
-    # Pillow rendering is synchronous CPU-bound work (~4-10s) — calling it
-    # directly here would freeze the whole bot's event loop for every user
-    # for the entire render, not just this one card. It runs in a worker
-    # thread of its own, which also releases the render slot when it ends.
-    build_kwargs = {
-        "background_bytes": _background_path_for_banner(banner).read_bytes(),
-        "landing_card": landing_card,
-        "filler_cards": filler_cards,
-    }
     await _acquire_render_slot(wait=wait_for_slot, timeout=slot_timeout)
-    # A render that a timeout abandoned may have written this card's MP4 while this call waited for the slot.
-    local_bytes = _read_local_reel(settings=settings, banner=banner, card_code=landing_card_code, cache_version=cache_version)
-    if local_bytes is not None:
-        _render_slot.release()
-        return local_bytes
+    handed_to_thread = False
     try:
+        # A render that a timeout abandoned may have written this card's MP4 while this call waited for the slot.
+        local_bytes = _read_local_reel(settings=settings, banner=banner, card_code=landing_card_code, cache_version=cache_version)
+        if local_bytes is not None:
+            return local_bytes
+        async with httpx.AsyncClient(timeout=settings.gacha_timeout_seconds, follow_redirects=True) as client:
+            filler_bytes, landing_image_bytes = await _fetch_portraits(
+                client, [card.image_url for card in chosen], landing_image_url
+            )
+        filler_cards = [
+            ReelCard(
+                name=card.name,
+                rarity_label=card.rarity_label,
+                border_color=_rarity_border_color(card.rarity),
+                image_bytes=image_bytes,
+            )
+            for card, image_bytes in zip(chosen, filler_bytes, strict=True)
+        ]
+
+        landing_card = ReelCard(
+            name=landing_card_name,
+            rarity_label=landing_rarity_label,
+            border_color=landing_border_color,
+            image_bytes=landing_image_bytes,
+        )
+        # Pillow rendering is synchronous CPU-bound work (~4-10s) — calling it
+        # directly here would freeze the whole bot's event loop for every user
+        # for the entire render, not just this one card. It runs in a worker
+        # thread of its own, which also releases the render slot when it ends.
+        build_kwargs = {
+            "background_bytes": _background_path_for_banner(banner).read_bytes(),
+            "landing_card": landing_card,
+            "filler_cards": filler_cards,
+        }
         job = _RENDER_EXECUTOR.submit(
             partial(
                 _render_reel_in_worker,
@@ -335,9 +355,12 @@ async def _render_reel_gif(
                 cache_version=cache_version,
             ),
         )
-    except BaseException:
-        _render_slot.release()
-        raise
+        handed_to_thread = True
+    finally:
+        # Reached without a job when the disk copy turned up, a download failed or the call was cancelled. The thread
+        # releases the slot itself once a job is submitted.
+        if not handed_to_thread:
+            _render_slot.release()
     job.add_done_callback(_release_slot_if_cancelled)
     rendering = asyncio.wrap_future(job)
     if render_timeout is None:
@@ -604,7 +627,7 @@ async def _warm_up_card_once(
     """One attempt at one card. Returns True when the attempt was deferred, because the render slot or the render ran out
     of budget or the upload did, so the caller can try the card again later. Other failures are logged and skipped."""
     try:
-        await asyncio.wait_for(
+        admin_message_id = await asyncio.wait_for(
             _warm_up_one_card(
                 settings=settings,
                 bot=bot,
@@ -632,6 +655,10 @@ async def _warm_up_card_once(
             # would silently fail to commit for the rest of the run
             # (found live, 2026-08-19).
             await _safe_on_card_error(on_card_error, banner=banner, card_code=card.code)
+        return False
+    # Outside the card budget. The card is committed by now, so nothing in this delete can defer it again. A slow or failed
+    # delete only leaves the message in the admin chat.
+    await _delete_warmup_message(settings=settings, bot=bot, message_id=admin_message_id)
     return False
 
 
@@ -648,7 +675,9 @@ async def _safe_on_card_error(on_card_error, *, banner: str, card_code: str) -> 
 
 async def _warm_up_one_card(
     *, settings: Settings, bot: Bot, activity_repo, banner: str, card, on_card_done, release_connection=None
-) -> None:
+) -> int:
+    """Renders, uploads, caches and commits one card. Returns the admin message id, which the caller deletes once the card
+    budget no longer applies."""
     resolved = await resolve_gacha_reel_animation(
         settings=settings,
         activity_repo=activity_repo,
@@ -662,16 +691,13 @@ async def _warm_up_one_card(
         render_timeout=_WARMUP_RENDER_SECONDS,
         release_connection=release_connection,
     )
-    await asyncio.wait_for(
-        _upload_warmup_animation(
-            settings=settings,
-            bot=bot,
-            activity_repo=activity_repo,
-            banner=banner,
-            card=card,
-            resolved=resolved,
-        ),
-        timeout=_WARMUP_UPLOAD_SECONDS,
+    message_id = await _upload_warmup_animation(
+        settings=settings,
+        bot=bot,
+        activity_repo=activity_repo,
+        banner=banner,
+        card=card,
+        resolved=resolved,
     )
     if on_card_done is not None:
         # Commit incrementally — a restart mid-warmup must not throw away
@@ -679,11 +705,17 @@ async def _warm_up_one_card(
         # separately safe on local disk regardless, but without this a
         # restart still re-uploads/re-sends every card processed so far.
         await on_card_done()
+    return message_id
 
 
-async def _upload_warmup_animation(*, settings: Settings, bot: Bot, activity_repo, banner: str, card, resolved) -> None:
-    """Sends the card's animation to the admin chat, caches the resulting file_id and deletes the message again."""
-    sent = await bot.send_animation(chat_id=settings.gacha_admin_user_id, animation=resolved.payload)
+async def _upload_warmup_animation(*, settings: Settings, bot: Bot, activity_repo, banner: str, card, resolved) -> int:
+    """Sends the card's animation to the admin chat and caches the file_id Telegram returns. Only the send is bounded by
+    the upload budget. Once Telegram has accepted the file, the cache write runs without it, so a slow write cannot time
+    out and lose the file_id. Returns the id of the admin message, which the caller deletes."""
+    sent = await asyncio.wait_for(
+        bot.send_animation(chat_id=settings.gacha_admin_user_id, animation=resolved.payload),
+        timeout=_WARMUP_UPLOAD_SECONDS,
+    )
     if resolved.needs_caching and getattr(sent, "animation", None) is not None:
         await cache_reel_variant_after_send(
             activity_repo=activity_repo,
@@ -692,7 +724,18 @@ async def _upload_warmup_animation(*, settings: Settings, bot: Bot, activity_rep
             telegram_file_id=sent.animation.file_id,
             cache_version=resolved.cache_version,
         )
+    return sent.message_id
+
+
+async def _delete_warmup_message(*, settings: Settings, bot: Bot, message_id: int) -> None:
+    """Removes the admin copy of a warmup animation. Best effort, and it runs after the commit: a failure or a timeout here
+    only leaves the message in the admin chat, and it never reaches the rollback path."""
     try:
-        await bot.delete_message(chat_id=settings.gacha_admin_user_id, message_id=sent.message_id)
+        await asyncio.wait_for(
+            bot.delete_message(chat_id=settings.gacha_admin_user_id, message_id=message_id),
+            timeout=_WARMUP_DELETE_SECONDS,
+        )
     except TelegramBadRequest:
         pass
+    except Exception:
+        logger.warning("Gacha animation warmup: admin message %s was not deleted", message_id, exc_info=True)
