@@ -549,10 +549,10 @@ async def test_build_gacha_info_view_shows_coin_balance_and_currency_buttons(mon
     assert "Монеты бота" in text
     assert "🪙 Монеты бота: <b>200 942</b>" in text
     assert "💱 Курс: <b>1</b> валюта = <b>10</b> монет" in text
-    assert "«гача генш» или «гача хср» в чате" in text
-    assert "«моя гача генш» или «моя гача хср»" in text
+    assert "«гача генш», «гача хср» или «гача ззз» в чате" in text
+    assert "«моя гача генш», «моя гача хср» или «моя гача ззз»" in text
     assert "⬜ обычная, 🟦 редкая, 🟪 эпическая, 🟨 легендарная, 🟥 мифическая" in text
-    assert "/help → 🎮 Игры и развлечения → 🎴 Гача Genshin и HSR" in text
+    assert "/help → 🎮 Игры и развлечения → 🎴 Гача Genshin, HSR и ZZZ" in text
     assert '<tg-emoji emoji-id="primogem-id">💠</tg-emoji> Примогемы' in text
     assert "📊 В коллекции: 🟨 <b>10</b> | 🟪 <b>7</b>" in text
     assert markup is not None

@@ -13,6 +13,10 @@ function getRarityClass(rarity: string): string {
   return ''
 }
 
+// Duplicate-stage prefixes match the bot: Genshin constellations, HSR eidolons, ZZZ mindscapes.
+const UPGRADE_PREFIX_BY_BANNER: Record<string, string> = { hsr: 'E', zzz: 'М' }
+const DEFAULT_UPGRADE_PREFIX = 'C'
+
 export function CollectionGrid({ cards, banner }: CollectionGridProps) {
   if (cards.length === 0) {
     return (
@@ -29,7 +33,7 @@ export function CollectionGrid({ cards, banner }: CollectionGridProps) {
       {cards.map((card) => {
         const rarityClass = getRarityClass(card.rarity)
         const upgradeLevel = card.copies_owned - 1
-        const constellationText = upgradeLevel > 0 ? (banner === 'hsr' ? `E${upgradeLevel}` : `C${upgradeLevel}`) : ''
+        const constellationText = upgradeLevel > 0 ? (UPGRADE_PREFIX_BY_BANNER[banner] ?? DEFAULT_UPGRADE_PREFIX) + upgradeLevel : ''
 
         return (
           <div

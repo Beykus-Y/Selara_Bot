@@ -1,4 +1,5 @@
 from selara.application.dto import CommandIntent
+from selara.application.gacha_banners import gacha_banner_aliases
 from selara.presentation.commands.aliases import EXACT_ALIASES
 from selara.presentation.commands.catalog import PREFIX_TRIGGER_TO_COMMAND_KEY, prefix_tail_is_valid
 from selara.presentation.commands.normalizer import normalize_text_command
@@ -8,11 +9,7 @@ class TextCommandResolutionError(ValueError):
     pass
 
 
-_GACHA_BANNER_ALIASES = {
-    "генш": "genshin",
-    "геншин": "genshin",
-    "хср": "hsr",
-}
+_GACHA_BANNER_ALIASES = gacha_banner_aliases()
 
 
 def _parse_limit(raw: str, *, top_max: int) -> int:

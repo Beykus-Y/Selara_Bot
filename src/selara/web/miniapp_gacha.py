@@ -19,6 +19,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from selara.application.gacha_banners import GACHA_BANNER_CODES
 from selara.application.use_cases.gacha import (
     GachaUseCaseError,
     get_collection as get_collection_use_case,
@@ -33,7 +34,7 @@ UserLoader = Callable[[AsyncSession, Request], Awaitable[UserSnapshot | None]]
 GachaLoader = Callable[..., Awaitable[Any]]
 
 # The gacha service ships exactly these banners; anything else is rejected before a network call.
-SUPPORTED_BANNERS = ("genshin", "hsr")
+SUPPORTED_BANNERS = GACHA_BANNER_CODES
 DEFAULT_BANNER = "genshin"
 DEFAULT_PROFILE_LIMIT = 5
 _MIN_PROFILE_LIMIT = 1

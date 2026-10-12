@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from selara.application.economy_interfaces import EconomyRepository
+from selara.application.gacha_banners import get_gacha_banner_profile
 from selara.application.use_cases.economy.common import (
     get_account_or_error,
     resolve_scope_or_error,
@@ -306,9 +307,8 @@ async def grant_currency(
 
 
 def _gacha_currency_label(banner: str) -> str:
-    if (banner or "").strip().lower() == "hsr":
-        return "звездного нефрита"
-    return "примогемов"
+    profile = get_gacha_banner_profile(banner)
+    return profile.currency_genitive if profile is not None else "примогемов"
 
 
 async def buy_currency_with_coins(
