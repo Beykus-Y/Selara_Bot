@@ -308,7 +308,11 @@ async def test_gacha_sell_timeout_sends_operational_alert(monkeypatch: pytest.Mo
 async def test_gacha_info_hides_unexpected_exception_and_reports_it(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(text_commands, "_load_gacha_coin_balance", AsyncMock(return_value=None))
     monkeypatch.setattr(text_commands, "_render_gacha_info_section", lambda **_kwargs: "profile ok")
-    monkeypatch.setattr(text_commands, "get_gacha_profile", AsyncMock(side_effect=[SimpleNamespace(), RuntimeError("INTERNAL_SECRET")]))
+    monkeypatch.setattr(
+        text_commands,
+        "get_gacha_profile",
+        AsyncMock(side_effect=[SimpleNamespace(), RuntimeError("INTERNAL_SECRET"), SimpleNamespace()]),
+    )
     alert = AsyncMock()
     monkeypatch.setattr(text_commands, "notify_operational_error", alert)
     activity_repo = SimpleNamespace(is_gacha_animation_enabled=AsyncMock(return_value=False))
@@ -556,16 +560,17 @@ async def test_build_gacha_info_view_shows_coin_balance_and_currency_buttons(mon
     assert '<tg-emoji emoji-id="primogem-id">💠</tg-emoji> Примогемы' in text
     assert "📊 В коллекции: 🟨 <b>10</b> | 🟪 <b>7</b>" in text
     assert markup is not None
-    # Pull and currency purchase are on separate rows, one button per row.
-    assert [len(row) for row in markup.inline_keyboard] == [1, 1, 1, 1, 1]
+    # Pull and currency purchase are on separate rows, one button per row: two rows per banner
+    # (Genshin, HSR, ZZZ) and one animation toggle row at the end.
+    assert [len(row) for row in markup.inline_keyboard] == [1, 1, 1, 1, 1, 1, 1]
     assert markup.inline_keyboard[0][0].icon_custom_emoji_id == "event-id"
     assert markup.inline_keyboard[0][0].text == "Крутка • Геншин (160 валюты)"
     assert markup.inline_keyboard[1][0].icon_custom_emoji_id == "primogem-id"
     assert markup.inline_keyboard[1][0].text == "+160 примогемов за 1600 монет"
     assert markup.inline_keyboard[2][0].icon_custom_emoji_id is None
     assert markup.inline_keyboard[3][0].icon_custom_emoji_id is None
-    assert "Вкл" in markup.inline_keyboard[4][0].text
-    assert markup.inline_keyboard[4][0].callback_data == "gacha:animtoggle:u1"
+    assert "Вкл" in markup.inline_keyboard[6][0].text
+    assert markup.inline_keyboard[6][0].callback_data == "gacha:animtoggle:u1"
 
 
 @pytest.mark.asyncio
