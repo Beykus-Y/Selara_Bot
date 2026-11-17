@@ -48,6 +48,8 @@ async def run_startup_relationship_cleanup(
         f"Удалено остаточных пар: {summary.pairs_removed}. "
         f"Отменено предложений: {summary.proposals_cancelled}. "
         f"Заархивировано семейных связей: {summary.family_links_archived}. "
+        f"Кланы: убрано вышедших участников {summary.clan_memberships_removed}, "
+        f"расформировано {summary.clans_removed}, передано создателю {summary.clans_transferred}. "
         f"{gacha_status_line}"
     )
     logger.info(report)

@@ -17,6 +17,7 @@ from selara.presentation.handlers.clans import (
     create_clan_handler,
     delete_clan_callback,
     delete_clan_handler,
+    disband_clan_by_name_handler,
     join_clan_callback,
     join_clan_handler,
     leave_clan_callback,
@@ -663,3 +664,97 @@ async def test_delete_callback_creator_deletes():
     alert_text = q.answer.await_args.args[0]
     assert "Alpha" in alert_text
     assert "удалён" in alert_text
+
+
+# ---------------------------------------------------------------------------
+# Handler tests: disband_clan_by_name_handler (admin disband)
+# ---------------------------------------------------------------------------
+
+def _settings(admin_user_id: int | None = 999):
+    return SimpleNamespace(admin_user_id=admin_user_id)
+
+
+def _admin_bot(status: str):
+    bot = MagicMock()
+    bot.get_chat_member = AsyncMock(return_value=SimpleNamespace(status=status))
+    return bot
+
+
+async def test_disband_by_name_chat_admin_can_delete_foreign_clan():
+    msg = _msg(user_id=5, text="удалить клан Alpha")
+    session = _mock_session()
+    with patch(
+        "selara.presentation.handlers.clans._find_clan_by_name",
+        new=AsyncMock(return_value=_clan(creator_user_id=1)),
+    ):
+        await disband_clan_by_name_handler(msg, _admin_bot("administrator"), db_session=session, settings=_settings())
+
+    assert session.execute.await_count == 2  # members, then clan
+    assert "расформирован" in msg.reply.await_args.args[0]
+
+
+async def test_disband_by_name_bot_owner_does_not_need_chat_admin():
+    msg = _msg(user_id=999, text="удалить клан Alpha")
+    session = _mock_session()
+    bot = _admin_bot("member")
+    with patch(
+        "selara.presentation.handlers.clans._find_clan_by_name",
+        new=AsyncMock(return_value=_clan(creator_user_id=1)),
+    ):
+        await disband_clan_by_name_handler(msg, bot, db_session=session, settings=_settings())
+
+    bot.get_chat_member.assert_not_awaited()
+    assert "расформирован" in msg.reply.await_args.args[0]
+
+
+async def test_disband_by_name_regular_member_is_refused():
+    msg = _msg(user_id=5, text="удалить клан Alpha")
+    session = _mock_session()
+    with patch(
+        "selara.presentation.handlers.clans._find_clan_by_name",
+        new=AsyncMock(return_value=_clan(creator_user_id=1)),
+    ):
+        await disband_clan_by_name_handler(msg, _admin_bot("member"), db_session=session, settings=_settings())
+
+    session.execute.assert_not_awaited()
+    assert "только админы" in msg.reply.await_args.args[0]
+
+
+async def test_disband_by_name_admin_check_failure_is_refused():
+    msg = _msg(user_id=5, text="удалить клан Alpha")
+    session = _mock_session()
+    bot = MagicMock()
+    bot.get_chat_member = AsyncMock(side_effect=RuntimeError("telegram down"))
+    with patch(
+        "selara.presentation.handlers.clans._find_clan_by_name",
+        new=AsyncMock(return_value=_clan(creator_user_id=1)),
+    ):
+        await disband_clan_by_name_handler(msg, bot, db_session=session, settings=_settings())
+
+    session.execute.assert_not_awaited()
+
+
+async def test_disband_by_name_creator_may_delete_own_clan_by_name():
+    msg = _msg(user_id=1, text="удалить клан Alpha")
+    session = _mock_session()
+    bot = _admin_bot("member")
+    with patch(
+        "selara.presentation.handlers.clans._find_clan_by_name",
+        new=AsyncMock(return_value=_clan(creator_user_id=1)),
+    ):
+        await disband_clan_by_name_handler(msg, bot, db_session=session, settings=_settings())
+
+    assert "расформирован" in msg.reply.await_args.args[0]
+
+
+async def test_disband_by_name_unknown_clan():
+    msg = _msg(user_id=999, text="удалить клан Нет")
+    session = _mock_session()
+    with patch(
+        "selara.presentation.handlers.clans._find_clan_by_name",
+        new=AsyncMock(return_value=None),
+    ):
+        await disband_clan_by_name_handler(msg, _admin_bot("administrator"), db_session=session, settings=_settings())
+
+    session.execute.assert_not_awaited()
+    assert "не найден" in msg.reply.await_args.args[0]

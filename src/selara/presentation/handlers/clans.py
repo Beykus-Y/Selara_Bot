@@ -9,7 +9,9 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from selara.core.config import Settings
 from selara.infrastructure.db.models import ClanMemberModel, ClanModel, UserChatActivityModel, UserModel
+from selara.presentation.auth import is_telegram_chat_admin
 from selara.presentation.formatters import format_user_link
 from selara.presentation.handlers.common import safe_callback_answer as _safe_callback_answer
 
@@ -332,6 +334,60 @@ async def delete_clan_handler(message: Message, db_session: AsyncSession) -> Non
 
     await message.reply(
         f"Клан <b>{escape(row.name)}</b> удалён.",
+        parse_mode="HTML",
+    )
+
+
+async def _can_disband_any_clan(message: Message, bot: Bot, settings: Settings) -> bool:
+    """Bot owner (anywhere) or a live Telegram chat admin may disband any clan of the chat."""
+    if message.from_user is None or message.chat is None:
+        return False
+    user_id = message.from_user.id
+    if settings.admin_user_id is not None and user_id == settings.admin_user_id:
+        return True
+    try:
+        member = await bot.get_chat_member(chat_id=message.chat.id, user_id=user_id)
+    except Exception:
+        return False
+    return is_telegram_chat_admin(member)
+
+
+@router.message(F.text.lower().startswith("удалить клан "))
+async def disband_clan_by_name_handler(
+    message: Message, bot: Bot, db_session: AsyncSession, settings: Settings
+) -> None:
+    if message.from_user is None or message.chat is None:
+        return
+    chat_id = message.chat.id
+
+    raw = (message.text or "").strip()
+    query = raw[len("удалить клан "):].strip()
+    if not query:
+        return
+
+    clan = None
+    if query.isdigit():
+        clan = await _get_clan_by_id(db_session, clan_id=int(query), chat_id=chat_id)
+    if clan is None:
+        clan = await _find_clan_by_name(db_session, chat_id=chat_id, name=query)
+    if clan is None:
+        await message.reply(
+            f"Клан <b>{escape(query)}</b> не найден. Посмотри список: <b>кланы</b>",
+            parse_mode="HTML",
+        )
+        return
+
+    if clan.creator_user_id != message.from_user.id and not await _can_disband_any_clan(message, bot, settings):
+        await message.reply("Расформировать чужой клан могут только админы чата.")
+        return
+
+    clan_name = clan.name
+    await db_session.execute(delete(ClanMemberModel).where(ClanMemberModel.clan_id == clan.id))
+    await db_session.execute(delete(ClanModel).where(ClanModel.id == clan.id))
+    await db_session.flush()
+
+    await message.reply(
+        f"Клан <b>{escape(clan_name)}</b> расформирован.",
         parse_mode="HTML",
     )
 
