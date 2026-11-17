@@ -91,7 +91,8 @@ async def db():
         session.add(
             UserEntitlementModel(
                 user_id=OWNER, product_key=SELARA_PERSONAL_PRODUCT_KEY, status="active",
-                valid_from=NOW - timedelta(days=1), valid_until=NOW + timedelta(days=29),
+                valid_from=datetime.now(timezone.utc) - timedelta(days=1),
+                valid_until=datetime.now(timezone.utc) + timedelta(days=29),  # handler reads the wall clock
             )
         )
         await session.commit()

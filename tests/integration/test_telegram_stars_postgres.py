@@ -873,6 +873,8 @@ async def test_migration_collision_sums_remaining_paid_time_without_duplicate_en
     engine, factory = await _database()
     try:
         old_chat_id, new_chat_id = -700_751_010, -100_751_010
+        # migrate_chat_id reads the wall clock, so seed relative to the real current time.
+        seed_now = datetime.now(timezone.utc)
         await _seed_chats(factory, old_chat_id, new_chat_id)
         async with factory() as session:
             session.add_all(
@@ -881,23 +883,23 @@ async def test_migration_collision_sums_remaining_paid_time_without_duplicate_en
                         chat_id=old_chat_id,
                         product_key=SELARA_AI_PRODUCT_KEY,
                         status="active",
-                        valid_from=_NOW - timedelta(days=4),
-                        valid_until=_NOW + timedelta(days=10),
+                        valid_from=seed_now - timedelta(days=4),
+                        valid_until=seed_now + timedelta(days=10),
                     ),
                     ChatEntitlementModel(
                         chat_id=new_chat_id,
                         product_key=SELARA_AI_PRODUCT_KEY,
                         status="active",
-                        valid_from=_NOW - timedelta(days=2),
-                        valid_until=_NOW + timedelta(days=20),
+                        valid_from=seed_now - timedelta(days=2),
+                        valid_until=seed_now + timedelta(days=20),
                     ),
                 ]
             )
             await session.commit()
-        before = datetime.now(timezone.utc)
+        before = seed_now
         expected_remaining_seconds = sum(
             max(0.0, (valid_until - before).total_seconds())
-            for valid_until in (_NOW + timedelta(days=10), _NOW + timedelta(days=20))
+            for valid_until in (seed_now + timedelta(days=10), seed_now + timedelta(days=20))
         )
         expected_valid_until = before + timedelta(seconds=expected_remaining_seconds)
         async with factory() as session:
