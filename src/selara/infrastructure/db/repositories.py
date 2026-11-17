@@ -130,6 +130,8 @@ from selara.infrastructure.db.models import (
     ChatInterestingFactDeliveryModel,
     ChatInterestingFactStateModel,
     ChatModel,
+    ClanMemberModel,
+    ClanModel,
     ChatRoleDefinitionModel,
     ChatSettingsModel,
     ChatTextAliasModel,
@@ -1351,6 +1353,20 @@ class SqlAlchemyActivityRepository:
                     ),
                 ),
             ),
+            (
+                ClanMemberModel,
+                and_(
+                    ClanMemberModel.chat_id == UserChatActivityModel.chat_id,
+                    ClanMemberModel.user_id == UserChatActivityModel.user_id,
+                ),
+            ),
+            (
+                ClanModel,
+                and_(
+                    ClanModel.chat_id == UserChatActivityModel.chat_id,
+                    ClanModel.creator_user_id == UserChatActivityModel.user_id,
+                ),
+            ),
         )
         for model, join_condition in relationship_sources:
             rows = (
@@ -1476,11 +1492,117 @@ class SqlAlchemyActivityRepository:
             await self._session.delete(row)
 
         await self._session.flush()
+        clan_summary = await self._cleanup_inactive_member_clans(chat_id=chat_id, user_id=user_id)
         return RelationshipCleanupSummary(
             marriages_removed=len(marriage_rows),
             pairs_removed=len(pair_rows),
             proposals_cancelled=len(proposal_rows),
             family_links_archived=len(graph_rows),
+            clan_memberships_removed=clan_summary.clan_memberships_removed,
+            clans_removed=clan_summary.clans_removed,
+            clans_transferred=clan_summary.clans_transferred,
+        )
+
+    async def _cleanup_inactive_member_clans(self, *, chat_id: int, user_id: int) -> RelationshipCleanupSummary:
+        """Drop a departed member from clans; hand the clan over or disband it if they were its creator.
+
+        The successor is the longest-standing remaining clan member who is still an active chat
+        member. A clan with nobody left to lead it is disbanded (members are deleted explicitly,
+        since SQLite test databases do not enforce ON DELETE CASCADE).
+        """
+        membership_clan_ids = set(
+            (
+                await self._session.execute(
+                    select(ClanMemberModel.clan_id).where(
+                        ClanMemberModel.chat_id == chat_id,
+                        ClanMemberModel.user_id == user_id,
+                    )
+                )
+            ).scalars().all()
+        )
+        created_clan_ids = set(
+            (
+                await self._session.execute(
+                    select(ClanModel.id).where(
+                        ClanModel.chat_id == chat_id,
+                        ClanModel.creator_user_id == user_id,
+                    )
+                )
+            ).scalars().all()
+        )
+        affected_clan_ids = sorted(membership_clan_ids | created_clan_ids)
+        if not affected_clan_ids:
+            return RelationshipCleanupSummary()
+
+        memberships_removed = 0
+        clans_removed = 0
+        clans_transferred = 0
+
+        removed = await self._session.execute(
+            delete(ClanMemberModel).where(
+                ClanMemberModel.chat_id == chat_id,
+                ClanMemberModel.user_id == user_id,
+            )
+        )
+        memberships_removed += int(removed.rowcount or 0)
+
+        for clan_id in affected_clan_ids:
+            clan = (
+                await self._session.execute(
+                    select(ClanModel).where(ClanModel.id == clan_id).with_for_update()
+                )
+            ).scalar_one_or_none()
+            if clan is None:
+                continue
+            remaining_ids = list(
+                (
+                    await self._session.execute(
+                        select(ClanMemberModel.user_id).where(ClanMemberModel.clan_id == clan_id)
+                    )
+                ).scalars().all()
+            )
+            creator_left = int(clan.creator_user_id) == user_id
+            if remaining_ids and not creator_left:
+                continue
+
+            successor_id: int | None = None
+            if remaining_ids:
+                successor_id = (
+                    await self._session.execute(
+                        select(ClanMemberModel.user_id)
+                        .join(
+                            UserChatActivityModel,
+                            and_(
+                                UserChatActivityModel.chat_id == ClanMemberModel.chat_id,
+                                UserChatActivityModel.user_id == ClanMemberModel.user_id,
+                            ),
+                        )
+                        .where(
+                            ClanMemberModel.clan_id == clan_id,
+                            UserChatActivityModel.is_active_member.is_(True),
+                        )
+                        .order_by(ClanMemberModel.joined_at, ClanMemberModel.user_id)
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+
+            if successor_id is not None:
+                clan.creator_user_id = int(successor_id)
+                clans_transferred += 1
+                continue
+
+            disbanded = await self._session.execute(
+                delete(ClanMemberModel).where(ClanMemberModel.clan_id == clan_id)
+            )
+            memberships_removed += int(disbanded.rowcount or 0)
+            await self._session.execute(delete(ClanModel).where(ClanModel.id == clan_id))
+            clans_removed += 1
+
+        await self._session.flush()
+        return RelationshipCleanupSummary(
+            clan_memberships_removed=memberships_removed,
+            clans_removed=clans_removed,
+            clans_transferred=clans_transferred,
         )
 
     async def _get_chat_event_sync_status(self, *, chat_id: int) -> str | None:

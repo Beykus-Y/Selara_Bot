@@ -113,7 +113,7 @@ _LOCKED_CALLBACK_PREFIXES: tuple[str, ...] = (
 
 # Мутирующие текстовые команды кланов (handlers/clans.py): отдельный роутер с text-фильтрами,
 # ключей каталога у них нет. Просмотр (`клан`, `кланы`) не блокируется.
-_LOCKED_CLAN_TEXT_PREFIXES: tuple[str, ...] = ("создать клан ", "вступить в клан ")
+_LOCKED_CLAN_TEXT_PREFIXES: tuple[str, ...] = ("создать клан ", "вступить в клан ", "удалить клан ")
 _LOCKED_CLAN_TEXT_EXACT: frozenset[str] = frozenset({"удалить клан", "выйти из клана"})
 
 CHAT_WRITE_LOCK_ANSWER = "🔒 Чат заблокирован администратором. Команда недоступна."

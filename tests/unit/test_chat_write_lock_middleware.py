@@ -150,7 +150,7 @@ def test_read_only_and_admin_keys_are_not_locked(key: str) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("text", ["создать клан Тест", "Вступить в клан Тест", "выйти из клана", "удалить клан"])
+@pytest.mark.parametrize("text", ["создать клан Тест", "Вступить в клан Тест", "выйти из клана", "удалить клан", "удалить клан Тест"])
 async def test_lock_blocks_clan_mutations(text: str) -> None:
     middleware = ChatWriteLockMiddleware()
     handler = AsyncMock(return_value="handled")

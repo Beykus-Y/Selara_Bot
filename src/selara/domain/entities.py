@@ -431,6 +431,9 @@ class RelationshipCleanupSummary:
     pairs_removed: int = 0
     proposals_cancelled: int = 0
     family_links_archived: int = 0
+    clan_memberships_removed: int = 0
+    clans_removed: int = 0
+    clans_transferred: int = 0
 
     def __add__(self, other: "RelationshipCleanupSummary") -> "RelationshipCleanupSummary":
         return RelationshipCleanupSummary(
@@ -438,6 +441,9 @@ class RelationshipCleanupSummary:
             pairs_removed=self.pairs_removed + other.pairs_removed,
             proposals_cancelled=self.proposals_cancelled + other.proposals_cancelled,
             family_links_archived=self.family_links_archived + other.family_links_archived,
+            clan_memberships_removed=self.clan_memberships_removed + other.clan_memberships_removed,
+            clans_removed=self.clans_removed + other.clans_removed,
+            clans_transferred=self.clans_transferred + other.clans_transferred,
         )
 
 
