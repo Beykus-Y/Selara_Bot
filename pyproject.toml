@@ -44,7 +44,7 @@ dev = [
 where = ["src"]
 
 [dependency-groups]
-build = ["setuptools==84.0.0", "wheel==0.48.0"]
+build = ["setuptools==84.1.0", "wheel==0.48.0"]
 audit = ["pip-audit>=2.9,<3", "pip>=26.2.1,<27"]
 browser = ["playwright>=1.40.0,<2", "Jinja2>=3.1.4,<4"]
 
